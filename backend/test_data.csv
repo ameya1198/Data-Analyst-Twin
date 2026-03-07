@@ -1,0 +1,9 @@
+name,age,department,salary,tenure_years,performance_score
+Alice,30,Engineering,95000,5,4.2
+Bob,25,Marketing,72000,2,3.8
+Charlie,35,Engineering,110000,8,4.5
+Diana,28,Sales,68000,3,3.5
+Eve,42,Marketing,88000,12,4.1
+Frank,31,Engineering,102000,6,4.8
+,29,Sales,71000,1,
+Helen,38,Marketing,79000,7,3.9
