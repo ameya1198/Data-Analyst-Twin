@@ -17,9 +17,13 @@ _supervisors: dict[str, object] = {}
 
 def _get_or_create_supervisor(session_id: str):
     """Reuse a Supervisor per WebSocket session so conversation memory persists."""
+    context = get_context()
     if session_id not in _supervisors:
-        context = get_context()
         _supervisors[session_id] = create_supervisor(context=context)
+    else:
+        # Always update the context reference in case datasets were added
+        sup = _supervisors[session_id]
+        sup.context = context  # type: ignore[attr-defined]
     return _supervisors[session_id]
 
 

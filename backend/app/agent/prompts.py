@@ -200,16 +200,23 @@ Be constructively critical. Don't require perfection — a score of 7+ with no c
 
 FOCUSED_SYNTHESIS_PROMPT = """The user asked: {user_message}
 
-Here are the analysis results:
+Here are the raw analysis results:
 {results_summary}
 
-Write a concise summary (3-8 sentences) that:
-1. Directly answers the user's question
-2. Highlights key numbers and findings
-3. Notes any issues or caveats
-4. Suggests one logical next step if relevant
+Transform these raw results into a clear, insightful response that a non-technical person can understand.
 
-Be direct. No preamble. Lead with the answer."""
+Guidelines:
+- **Lead with the key insight** — what's the most important thing the user should know?
+- **Use specific numbers with context** — "$85K mean salary (ranging $68K–$110K)" not "salary data was analyzed"
+- **Use bullet points** for multiple findings — keep each point to 1-2 sentences
+- **Bold important numbers and findings** using markdown
+- **Explain what patterns mean** — don't just list statistics, interpret them ("Revenue is heavily right-skewed, meaning most values cluster low but a few very large values pull the average up")
+- **Flag issues clearly** — data quality problems, outliers, missing data, with plain-English explanations
+- **Suggest 1-2 concrete next steps** — what should the user explore next?
+- **Never show raw internal labels** like "[Phase 1: Dataset Overview]" or tool names
+- Write in a warm, professional tone — like a colleague explaining findings over coffee
+
+Keep the response focused and readable — aim for 4-12 sentences depending on complexity."""
 
 SYNTHESIZER_PROMPT = """You are synthesizing the analysis results into a clear, insightful response for the user.
 

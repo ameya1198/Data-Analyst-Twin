@@ -196,52 +196,13 @@ class Supervisor:
 
         self.memory.add_user_message(user_message)
 
-        final_text = self._format_direct_response(user_message, result)
+        final_text = await self._synthesize_lightweight(user_message, [result])
         self.memory.add_assistant_message(final_text)
 
         yield StreamEvent(
             event_type=StreamEventType.FINAL_RESPONSE,
             data=final_text,
         )
-
-    @staticmethod
-    def _format_direct_response(
-        user_message: str, result: SpecialistResult,
-    ) -> str:
-        """Build a clean, human-readable response for DIRECT mode (no LLM call)."""
-        if not result.success:
-            return f"Sorry, I ran into an issue: {result.error}"
-
-        parts: list[str] = []
-        parts.append(f"Here are the results for your request:\n")
-
-        if result.summary:
-            clean = result.summary
-            for prefix in ("[Phase 1:", "[Phase 2:", "[Phase 3:", "[Phase 4:", "[Phase 5:"):
-                if clean.startswith(prefix):
-                    clean = clean.split("]", 1)[-1].strip()
-                    break
-            parts.append(clean)
-
-        data = result.data
-        if isinstance(data, dict):
-            if "quality_score" in data:
-                score = data["quality_score"]
-                parts.append(f"\n**Data Quality Score:** {score:.1%}")
-            if "flags" in data and isinstance(data["flags"], list) and data["flags"]:
-                parts.append("\n**Flags:**")
-                for flag in data["flags"][:10]:
-                    parts.append(f"- {flag}")
-            if "recommendations" in data and isinstance(data["recommendations"], list):
-                parts.append("\n**Recommendations:**")
-                for rec in data["recommendations"][:5]:
-                    parts.append(f"- {rec}")
-
-        parts.append(
-            "\n*Expand the result card above for full details. "
-            "Ask a follow-up question to dig deeper.*"
-        )
-        return "\n".join(parts)
 
     # ─── FOCUSED Mode ─────────────────────────────────────────────────
     # 2 LLM calls — Plan + Execute + lightweight Synthesize (skip Reflect)
@@ -416,7 +377,13 @@ class Supervisor:
         response = await self._client.messages.create(
             model=settings.anthropic_model,
             max_tokens=2048,
-            system="You are a data analyst. Summarize analysis results concisely. Lead with key findings.",
+            system=(
+                "You are a friendly, senior data analyst explaining findings to a colleague. "
+                "Transform raw analysis output into clear, human-readable insights. "
+                "Use markdown formatting — bold key numbers, use bullet points for multiple findings. "
+                "Never show internal tool names, phase labels, or raw technical output. "
+                "Interpret what the numbers mean in plain English. Lead with the most important finding."
+            ),
             messages=[{"role": "user", "content": synth_message}],
         )
 
@@ -430,23 +397,20 @@ class Supervisor:
     # ─── No-data handler ──────────────────────────────────────────────
 
     async def _handle_no_data(self, user_message: str) -> AsyncGenerator[StreamEvent, None]:
-        system_prompt = (
-            "You are a data analyst digital twin. The user hasn't uploaded any data yet. "
-            "Help them understand what you can do, or ask them to upload a dataset. "
-            "Be friendly and specific about your capabilities: EDA, visualization, "
-            "SQL queries, statistical analysis, data cleaning, and natural language insights."
-        )
-
         self.memory.add_user_message(user_message)
 
-        response = await self._client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=1024,
-            system=system_prompt,
-            messages=self.memory.get_messages(),
+        text = (
+            "I don't have any datasets loaded right now. This can happen if the server "
+            "restarted since your last upload.\n\n"
+            "**Please re-upload your dataset** using the upload panel on the left sidebar, "
+            "and then ask your question again. I'll be ready to analyze it right away!\n\n"
+            "I can help with:\n"
+            "- **Exploratory Analysis** — profiling, distributions, correlations, outliers\n"
+            "- **Visualizations** — interactive charts following best practices\n"
+            "- **SQL Queries** — write and execute analytical SQL on your data\n"
+            "- **Statistical Tests** — hypothesis testing, A/B tests, regression\n"
+            "- **Data Cleaning** — deduplication, missing values, standardization"
         )
-
-        text = response.content[0].text
         self.memory.add_assistant_message(text)
 
         yield StreamEvent(
