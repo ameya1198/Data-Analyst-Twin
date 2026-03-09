@@ -82,6 +82,10 @@ class ConversationMemory:
     def is_empty(self) -> bool:
         return len(self._messages) == 0
 
+    @property
+    def has_history(self) -> bool:
+        return len(self._messages) > 0
+
     def clear(self) -> None:
         self._messages.clear()
 

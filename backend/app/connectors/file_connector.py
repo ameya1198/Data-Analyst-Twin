@@ -68,6 +68,14 @@ class FileConnector:
         try:
             buf = io.BytesIO(file_bytes)
             df = reader(buf)
+        except UnicodeDecodeError:
+            # Retry CSV/JSON with latin-1 which accepts any byte sequence
+            if extension in ("csv", "json"):
+                logger.info("file_ingest_encoding_fallback", filename=filename, fallback="latin-1")
+                buf = io.BytesIO(file_bytes)
+                df = reader(buf, encoding="latin-1")
+            else:
+                raise
         except Exception as e:
             logger.error("file_ingest_parse_error", filename=filename, error=str(e))
             raise ValueError(f"Failed to parse '{filename}': {str(e)}") from e

@@ -1,14 +1,18 @@
 """
 Supervisor — the main orchestrator of the Data Analyst Digital Twin.
 
-Implements the Plan-Execute-Reflect loop:
-1. PLAN: Ask Claude to create a structured analysis plan
-2. EXECUTE: Walk through the plan, delegating tool calls to specialists
-3. REFLECT: Evaluate results — re-plan if gaps are found
-4. SYNTHESIZE: Generate a final narrative response
+Routes user requests to the right execution mode based on intent classification:
 
-Falls back to dynamic tool-use loop when planning isn't possible
-(e.g., no data loaded, or simple conversational follow-ups).
+    DIRECT:         0 LLM calls  — known tool, skip Plan/Reflect/Synthesize
+    FOCUSED:        2 LLM calls  — Plan + Execute + lightweight Synthesize (skip Reflect)
+    FULL:           3-5 LLM calls — Plan + Execute + Reflect (up to 2 cycles) + Synthesize
+    CONVERSATIONAL: 1+ LLM calls — dynamic tool-use loop, Claude decides tools
+
+Examples:
+    "Profile my data"              → DIRECT   (just eda_profile, return result)
+    "Write SQL for top users"      → FOCUSED  (plan + execute, skip reflect)
+    "What insights can you find?"  → FULL     (full Plan-Execute-Reflect-Synthesize)
+    "Now show me a chart of that"  → CONVERSATIONAL (follow-up, dynamic)
 """
 
 from __future__ import annotations
@@ -19,10 +23,20 @@ from typing import AsyncGenerator
 import structlog
 from anthropic import AsyncAnthropic
 
+from app.agent.error_recovery import ErrorRecoveryMiddleware
 from app.agent.executor import Executor
+from app.agent.intent import (
+    ClassifiedIntent,
+    ExecutionMode,
+    IntentClassifier,
+)
 from app.agent.memory import ConversationMemory
 from app.agent.planner import AnalysisPlan, Planner
-from app.agent.prompts import SUPERVISOR_SYSTEM_PROMPT, SYNTHESIZER_PROMPT
+from app.agent.prompts import (
+    FOCUSED_SYNTHESIS_PROMPT,
+    SUPERVISOR_SYSTEM_PROMPT,
+    SYNTHESIZER_PROMPT,
+)
 from app.agent.reflector import Reflector
 from app.agent.specialists.base import ResultType, SpecialistRegistry, SpecialistResult
 from app.agent.specialists.context import AnalysisContext
@@ -37,7 +51,7 @@ class Supervisor:
     Top-level agent orchestrator.
 
     One Supervisor instance per session. It holds the conversation memory,
-    analysis context, and coordinates the Plan-Execute-Reflect cycle.
+    analysis context, and coordinates execution via intent-based routing.
     """
 
     def __init__(
@@ -52,10 +66,13 @@ class Supervisor:
         self.context = context or AnalysisContext()
         self.memory = ConversationMemory()
 
+        self._middleware = ErrorRecoveryMiddleware(registry)
+        self._intent_classifier = IntentClassifier()
         self._planner = Planner(self._client, registry)
         self._executor = Executor(
             self._client,
             registry,
+            middleware=self._middleware,
             max_tool_calls=max_tool_calls_per_turn or settings.max_specialist_calls_per_turn,
         )
         self._reflector = Reflector(self._client, registry)
@@ -63,8 +80,7 @@ class Supervisor:
 
     async def run(self, user_message: str) -> AsyncGenerator[StreamEvent, None]:
         """
-        Main entry point — process a user message through the full agent loop.
-
+        Main entry point — classify intent, route to the right execution mode.
         Yields StreamEvents that the WebSocket handler forwards to the frontend.
         """
         start_time = time.perf_counter()
@@ -81,7 +97,158 @@ class Supervisor:
                 yield event
             return
 
-        # --- PLAN ---
+        # ─── Intent Classification ────────────────────────────────────
+        classified = self._intent_classifier.classify(
+            user_message,
+            has_conversation_history=self.memory.has_history,
+            has_data=self.context.has_data,
+        )
+
+        yield StreamEvent(
+            event_type=StreamEventType.INTENT,
+            data={
+                "intent": classified.intent.value,
+                "mode": classified.mode.value,
+                "confidence": classified.confidence,
+                "reasoning": classified.reasoning,
+            },
+        )
+
+        # ─── Route by execution mode ─────────────────────────────────
+        if classified.mode == ExecutionMode.DIRECT:
+            async for event in self._run_direct(user_message, classified):
+                yield event
+
+        elif classified.mode == ExecutionMode.FOCUSED:
+            async for event in self._run_focused(user_message):
+                yield event
+
+        elif classified.mode == ExecutionMode.FULL:
+            async for event in self._run_full(user_message):
+                yield event
+
+        elif classified.mode == ExecutionMode.CONVERSATIONAL:
+            async for event in self._run_conversational(user_message):
+                yield event
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            "supervisor_run_complete",
+            session_id=self.context.session_id,
+            mode=classified.mode.value,
+            intent=classified.intent.value,
+            elapsed_ms=round(elapsed_ms, 2),
+        )
+
+    # ─── DIRECT Mode ──────────────────────────────────────────────────
+    # 0 LLM calls — known tool, known params, just execute and return
+
+    async def _run_direct(
+        self, user_message: str, classified: ClassifiedIntent,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        tool_name = classified.direct_tool
+        if not tool_name:
+            async for event in self._run_focused(user_message):
+                yield event
+            return
+
+        params = self._intent_classifier.get_direct_params(
+            classified, self.context.dataset_ids,
+        )
+
+        yield StreamEvent(
+            event_type=StreamEventType.SPECIALIST_CALL,
+            data={
+                "tool_name": tool_name,
+                "params": params,
+                "mode": "direct",
+            },
+            specialist_name=tool_name,
+        )
+
+        result, recovery_events = await self._middleware.execute_with_recovery(
+            tool_name, params, self.context,
+        )
+
+        for rev in recovery_events:
+            yield StreamEvent(
+                event_type=StreamEventType.ERROR_RECOVERY,
+                data=rev.to_stream_data(),
+                specialist_name=tool_name,
+            )
+
+        if result.success:
+            yield StreamEvent(
+                event_type=StreamEventType.SPECIALIST_RESULT,
+                data={
+                    "result_type": result.result_type.value,
+                    "summary": result.summary,
+                    "data": self._serialize_result_data(result),
+                },
+                specialist_name=result.specialist_name,
+            )
+        else:
+            yield StreamEvent(
+                event_type=StreamEventType.ERROR,
+                data={"error": result.error, "summary": result.summary},
+                specialist_name=tool_name,
+            )
+
+        self.memory.add_user_message(user_message)
+
+        final_text = self._format_direct_response(user_message, result)
+        self.memory.add_assistant_message(final_text)
+
+        yield StreamEvent(
+            event_type=StreamEventType.FINAL_RESPONSE,
+            data=final_text,
+        )
+
+    @staticmethod
+    def _format_direct_response(
+        user_message: str, result: SpecialistResult,
+    ) -> str:
+        """Build a clean, human-readable response for DIRECT mode (no LLM call)."""
+        if not result.success:
+            return f"Sorry, I ran into an issue: {result.error}"
+
+        parts: list[str] = []
+        parts.append(f"Here are the results for your request:\n")
+
+        if result.summary:
+            clean = result.summary
+            for prefix in ("[Phase 1:", "[Phase 2:", "[Phase 3:", "[Phase 4:", "[Phase 5:"):
+                if clean.startswith(prefix):
+                    clean = clean.split("]", 1)[-1].strip()
+                    break
+            parts.append(clean)
+
+        data = result.data
+        if isinstance(data, dict):
+            if "quality_score" in data:
+                score = data["quality_score"]
+                parts.append(f"\n**Data Quality Score:** {score:.1%}")
+            if "flags" in data and isinstance(data["flags"], list) and data["flags"]:
+                parts.append("\n**Flags:**")
+                for flag in data["flags"][:10]:
+                    parts.append(f"- {flag}")
+            if "recommendations" in data and isinstance(data["recommendations"], list):
+                parts.append("\n**Recommendations:**")
+                for rec in data["recommendations"][:5]:
+                    parts.append(f"- {rec}")
+
+        parts.append(
+            "\n*Expand the result card above for full details. "
+            "Ask a follow-up question to dig deeper.*"
+        )
+        return "\n".join(parts)
+
+    # ─── FOCUSED Mode ─────────────────────────────────────────────────
+    # 2 LLM calls — Plan + Execute + lightweight Synthesize (skip Reflect)
+
+    async def _run_focused(
+        self, user_message: str,
+    ) -> AsyncGenerator[StreamEvent, None]:
         plan = await self._plan(user_message)
         yield StreamEvent(
             event_type=StreamEventType.PLAN,
@@ -89,15 +256,10 @@ class Supervisor:
         )
 
         if not plan.steps:
-            # Planner couldn't produce steps — fall back to dynamic execution
-            logger.info("supervisor_fallback_dynamic", reason="empty_plan")
-            async for event in self._executor.execute_dynamic(
-                user_message, self.context, self.memory
-            ):
+            async for event in self._run_conversational(user_message):
                 yield event
             return
 
-        # --- EXECUTE ---
         all_results: list[SpecialistResult] = []
         async for event in self._executor.execute_plan(plan, self.context):
             yield event
@@ -106,10 +268,47 @@ class Supervisor:
                 if matched:
                     all_results.append(matched)
 
-        # --- REFLECT ---
+        final_response = await self._synthesize_lightweight(user_message, all_results)
+
+        self.memory.add_user_message(user_message)
+        self.memory.add_assistant_message(final_response)
+
+        yield StreamEvent(
+            event_type=StreamEventType.FINAL_RESPONSE,
+            data=final_response,
+        )
+
+    # ─── FULL Mode ────────────────────────────────────────────────────
+    # 3-5 LLM calls — Plan + Execute + Reflect (up to 2 cycles) + Synthesize
+
+    async def _run_full(
+        self, user_message: str,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        plan = await self._plan(user_message)
+        yield StreamEvent(
+            event_type=StreamEventType.PLAN,
+            data=plan.to_display(),
+        )
+
+        if not plan.steps:
+            async for event in self._run_conversational(user_message):
+                yield event
+            return
+
+        # Execute
+        all_results: list[SpecialistResult] = []
+        async for event in self._executor.execute_plan(plan, self.context):
+            yield event
+            if event.event_type == StreamEventType.SPECIALIST_RESULT:
+                matched = self._find_latest_result()
+                if matched:
+                    all_results.append(matched)
+
+        # Reflect (up to max_reflect_cycles)
+        error_context = self._middleware.get_error_context_for_reflector()
         for cycle in range(self._max_reflect_cycles):
             reflection = await self._reflector.reflect(
-                user_message, all_results, self.context
+                user_message, all_results, self.context, error_context=error_context,
             )
 
             yield StreamEvent(
@@ -126,7 +325,6 @@ class Supervisor:
             if reflection.is_satisfactory:
                 break
 
-            # Re-plan to address gaps
             logger.info(
                 "supervisor_replan",
                 cycle=cycle + 1,
@@ -147,8 +345,8 @@ class Supervisor:
                         if matched:
                             all_results.append(matched)
 
-        # --- SYNTHESIZE ---
-        final_response = await self._synthesize(user_message, all_results)
+        # Synthesize (full narrative)
+        final_response = await self._synthesize_full(user_message, all_results)
 
         self.memory.add_user_message(user_message)
         self.memory.add_assistant_message(final_response)
@@ -158,33 +356,32 @@ class Supervisor:
             data=final_response,
         )
 
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(
-            "supervisor_run_complete",
-            session_id=self.context.session_id,
-            elapsed_ms=round(elapsed_ms, 2),
-            result_count=len(all_results),
-        )
+    # ─── CONVERSATIONAL Mode ──────────────────────────────────────────
+    # Dynamic tool-use loop — Claude decides which tools to call
+
+    async def _run_conversational(
+        self, user_message: str,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        async for event in self._executor.execute_dynamic(
+            user_message, self.context, self.memory
+        ):
+            yield event
+
+    # ─── Planning ─────────────────────────────────────────────────────
 
     async def _plan(self, message: str) -> AnalysisPlan:
-        """Create an analysis plan via the Planner."""
         return await self._planner.create_plan(message, self.context)
 
-    async def _synthesize(
-        self, user_message: str, results: list[SpecialistResult]
-    ) -> str:
-        """Generate the final narrative response using Claude."""
-        results_summary = "\n".join(r.to_llm_context() for r in results)
+    # ─── Synthesis ────────────────────────────────────────────────────
 
-        # Get the most recent reflection for context
+    async def _synthesize_full(
+        self, user_message: str, results: list[SpecialistResult],
+    ) -> str:
+        """Full narrative synthesis — used in FULL mode."""
+        results_summary = "\n".join(r.to_llm_context() for r in results)
         reflection_summary = self.context.get_recent_results_summary(limit=5)
 
-        system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(
-            dataset_summaries=self.context.get_dataset_summaries(),
-            recent_results=self.context.get_recent_results_summary(),
-            capabilities_summary=self._registry.get_capabilities_summary(),
-        )
-
+        system_prompt = self._build_system_prompt()
         synth_message = SYNTHESIZER_PROMPT.format(
             user_message=user_message,
             results_summary=results_summary,
@@ -199,20 +396,45 @@ class Supervisor:
         )
 
         logger.info(
-            "supervisor_synthesize_complete",
+            "supervisor_synthesize_full",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
         )
-
         return response.content[0].text
 
+    async def _synthesize_lightweight(
+        self, user_message: str, results: list[SpecialistResult],
+    ) -> str:
+        """Lightweight synthesis — used in FOCUSED mode. One short LLM call."""
+        results_summary = "\n".join(r.to_llm_context() for r in results)
+
+        synth_message = FOCUSED_SYNTHESIS_PROMPT.format(
+            user_message=user_message,
+            results_summary=results_summary,
+        )
+
+        response = await self._client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=2048,
+            system="You are a data analyst. Summarize analysis results concisely. Lead with key findings.",
+            messages=[{"role": "user", "content": synth_message}],
+        )
+
+        logger.info(
+            "supervisor_synthesize_lightweight",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
+        return response.content[0].text
+
+    # ─── No-data handler ──────────────────────────────────────────────
+
     async def _handle_no_data(self, user_message: str) -> AsyncGenerator[StreamEvent, None]:
-        """Handle queries when no dataset is loaded yet."""
         system_prompt = (
             "You are a data analyst digital twin. The user hasn't uploaded any data yet. "
             "Help them understand what you can do, or ask them to upload a dataset. "
             "Be friendly and specific about your capabilities: EDA, visualization, "
-            "statistical analysis, data cleaning, and natural language insights."
+            "SQL queries, statistical analysis, data cleaning, and natural language insights."
         )
 
         self.memory.add_user_message(user_message)
@@ -232,8 +454,16 @@ class Supervisor:
             data=text,
         )
 
+    # ─── Helpers ──────────────────────────────────────────────────────
+
+    def _build_system_prompt(self) -> str:
+        return SUPERVISOR_SYSTEM_PROMPT.format(
+            dataset_summaries=self.context.get_dataset_summaries(),
+            recent_results=self.context.get_recent_results_summary(),
+            capabilities_summary=self._registry.get_capabilities_summary(),
+        )
+
     def _find_latest_result(self) -> SpecialistResult | None:
-        """Get the most recently added result from the context."""
         if self.context.results:
             entry = self.context.results[-1]
             try:
@@ -249,3 +479,11 @@ class Supervisor:
                 metadata=entry.metadata,
             )
         return None
+
+    def _serialize_result_data(self, result: SpecialistResult):
+        data = result.data
+        if data is None:
+            return None
+        if isinstance(data, (str, int, float, bool, list, dict)):
+            return data
+        return str(data)[:2000]

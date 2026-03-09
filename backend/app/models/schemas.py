@@ -12,6 +12,7 @@ class MessageRole(str, Enum):
 
 
 class StreamEventType(str, Enum):
+    INTENT = "intent"
     PLAN = "plan"
     SPECIALIST_CALL = "specialist_call"
     SPECIALIST_RESULT = "specialist_result"

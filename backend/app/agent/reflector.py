@@ -45,8 +45,11 @@ class Reflector:
         user_message: str,
         results: list[SpecialistResult],
         context: AnalysisContext,
+        error_context: str = "",
     ) -> Reflection:
         results_summary = "\n".join(r.to_llm_context() for r in results)
+        if error_context:
+            results_summary += f"\n\n{error_context}"
 
         system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(
             dataset_summaries=context.get_dataset_summaries(),

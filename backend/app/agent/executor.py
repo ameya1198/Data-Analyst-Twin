@@ -2,8 +2,14 @@
 Executor — Phase 2 of the Plan-Execute-Reflect loop.
 
 Takes an analysis plan and executes it step by step, delegating tool calls
-to the specialist registry. Also handles the Claude tool-use loop for
-dynamic execution when the plan has no pre-defined steps.
+to the specialist registry via the ErrorRecoveryMiddleware. Also handles the
+Claude tool-use loop for dynamic execution when the plan has no pre-defined steps.
+
+All tool calls go through the middleware, which provides:
+- Retry with exponential backoff for transient failures
+- Circuit breaker per specialist
+- Error classification and fallback tool suggestions
+- Recovery events streamed to the frontend
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
+from app.agent.error_recovery import ErrorRecoveryMiddleware, RecoveryEvent
 from app.agent.memory import ConversationMemory
 from app.agent.planner import AnalysisPlan, AnalysisStep
 from app.agent.prompts import SUPERVISOR_SYSTEM_PROMPT
@@ -32,13 +39,14 @@ class ExecutionResult:
     specialist_results: list[SpecialistResult] = field(default_factory=list)
     skipped_steps: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    recovery_events: list[RecoveryEvent] = field(default_factory=list)
     total_input_tokens: int = 0
     total_output_tokens: int = 0
 
 
 class Executor:
     """
-    Executes analysis plans by delegating to specialists.
+    Executes analysis plans by delegating to specialists via ErrorRecoveryMiddleware.
 
     Two execution modes:
     1. Plan-based: walks through AnalysisPlan steps sequentially
@@ -49,11 +57,17 @@ class Executor:
         self,
         client: AsyncAnthropic,
         registry: SpecialistRegistry,
+        middleware: ErrorRecoveryMiddleware | None = None,
         max_tool_calls: int = 15,
     ) -> None:
         self._client = client
         self._registry = registry
+        self._middleware = middleware or ErrorRecoveryMiddleware(registry)
         self._max_tool_calls = max_tool_calls
+
+    @property
+    def middleware(self) -> ErrorRecoveryMiddleware:
+        return self._middleware
 
     async def execute_plan(
         self,
@@ -61,8 +75,8 @@ class Executor:
         context: AnalysisContext,
     ) -> AsyncGenerator[StreamEvent, None]:
         """
-        Execute a structured plan step by step.
-        Yields StreamEvents for each specialist call and result.
+        Execute a structured plan step by step, with error recovery.
+        Yields StreamEvents for each specialist call, recovery attempt, and result.
         """
         execution = ExecutionResult()
 
@@ -78,14 +92,31 @@ class Executor:
                 specialist_name=step.tool_name,
             )
 
-            result = await self._execute_step(step, context)
+            result, recovery_events = await self._execute_step_with_recovery(step, context)
             execution.specialist_results.append(result)
+            execution.recovery_events.extend(recovery_events)
+
+            # Stream any recovery events that occurred
+            for rev in recovery_events:
+                yield StreamEvent(
+                    event_type=StreamEventType.ERROR_RECOVERY,
+                    data=rev.to_stream_data(),
+                    specialist_name=step.tool_name,
+                )
 
             if not result.success:
                 execution.errors.append(result.error or "Unknown error")
+
+                fallback = result.metadata.get("fallback_tool") if result.metadata else None
                 yield StreamEvent(
                     event_type=StreamEventType.ERROR,
-                    data={"step": step.step_number, "error": result.error},
+                    data={
+                        "step": step.step_number,
+                        "error": result.error,
+                        "error_category": result.metadata.get("error_category", "unknown") if result.metadata else "unknown",
+                        "suggestion": result.metadata.get("suggestion", "") if result.metadata else "",
+                        "fallback_tool": fallback,
+                    },
                     specialist_name=step.tool_name,
                 )
             else:
@@ -155,19 +186,38 @@ class Executor:
                             specialist_name=block.name,
                         )
 
-                        result = await self._registry.execute_tool(
+                        result, recovery_events = await self._middleware.execute_with_recovery(
                             block.name, block.input, context
                         )
 
-                        yield StreamEvent(
-                            event_type=StreamEventType.SPECIALIST_RESULT,
-                            data={
-                                "result_type": result.result_type.value,
-                                "summary": result.summary,
-                                "data": self._serialize_result_data(result),
-                            },
-                            specialist_name=result.specialist_name,
-                        )
+                        for rev in recovery_events:
+                            yield StreamEvent(
+                                event_type=StreamEventType.ERROR_RECOVERY,
+                                data=rev.to_stream_data(),
+                                specialist_name=block.name,
+                            )
+
+                        if result.success:
+                            yield StreamEvent(
+                                event_type=StreamEventType.SPECIALIST_RESULT,
+                                data={
+                                    "result_type": result.result_type.value,
+                                    "summary": result.summary,
+                                    "data": self._serialize_result_data(result),
+                                },
+                                specialist_name=result.specialist_name,
+                            )
+                        else:
+                            yield StreamEvent(
+                                event_type=StreamEventType.ERROR,
+                                data={
+                                    "error": result.error,
+                                    "error_category": result.metadata.get("error_category", "unknown") if result.metadata else "unknown",
+                                    "suggestion": result.metadata.get("suggestion", "") if result.metadata else "",
+                                    "fallback_tool": result.metadata.get("fallback_tool") if result.metadata else None,
+                                },
+                                specialist_name=block.name,
+                            )
 
                         tool_results.append({
                             "tool_use_id": block.id,
@@ -191,11 +241,11 @@ class Executor:
             data={"error": f"Reached maximum tool call limit ({self._max_tool_calls})"},
         )
 
-    async def _execute_step(
+    async def _execute_step_with_recovery(
         self, step: AnalysisStep, context: AnalysisContext
-    ) -> SpecialistResult:
-        """Execute a single plan step via the specialist registry."""
-        return await self._registry.execute_tool(
+    ) -> tuple[SpecialistResult, list[RecoveryEvent]]:
+        """Execute a single plan step via the middleware (retry + circuit breaker)."""
+        return await self._middleware.execute_with_recovery(
             step.tool_name, step.tool_params, context
         )
 
