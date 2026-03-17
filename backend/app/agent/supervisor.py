@@ -82,6 +82,7 @@ class Supervisor:
         )
         self._reflector = Reflector(self._client, registry)
         self._max_reflect_cycles = max_reflect_cycles
+        self._scoped_dataset_ids: list[str] | None = None
 
     @property
     def confirmation_manager(self) -> ConfirmationManager:
@@ -109,7 +110,10 @@ class Supervisor:
         return loaded
 
     async def run(
-        self, user_message: str, trace_id: str | None = None,
+        self,
+        user_message: str,
+        trace_id: str | None = None,
+        dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """
         Main entry point — classify intent, route to the right execution mode.
@@ -117,8 +121,12 @@ class Supervisor:
 
         Every yielded StreamEvent carries the same ``trace_id`` so the client
         can correlate all events belonging to one user message.
+
+        When dataset_ids is provided (from frontend selection), the planner and
+        prompts only include those datasets, so the agent analyzes the right data.
         """
         self._current_trace_id = trace_id
+        self._scoped_dataset_ids = dataset_ids
         start_time = time.perf_counter()
 
         logger.info(
@@ -164,7 +172,9 @@ class Supervisor:
                 yield self._tag(event)
 
         elif classified.mode == ExecutionMode.CONVERSATIONAL:
-            async for event in self._run_conversational(user_message):
+            async for event in self._run_conversational(
+                user_message, self._scoped_dataset_ids
+            ):
                 yield self._tag(event)
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -194,9 +204,13 @@ class Supervisor:
                 yield event
             return
 
-        params = self._intent_classifier.get_direct_params(
-            classified, self.context.dataset_ids,
+        # Use user-selected dataset when available; otherwise all datasets
+        ids = (
+            self._scoped_dataset_ids
+            if (self._scoped_dataset_ids and len(self._scoped_dataset_ids) > 0)
+            else self.context.dataset_ids
         )
+        params = self._intent_classifier.get_direct_params(classified, ids)
 
         yield StreamEvent(
             event_type=StreamEventType.SPECIALIST_CALL,
@@ -263,7 +277,7 @@ class Supervisor:
         )
 
         if not plan.steps:
-            async for event in self._run_conversational(user_message):
+            async for event in self._run_conversational(user_message, self._scoped_dataset_ids):
                 yield event
             return
 
@@ -298,7 +312,7 @@ class Supervisor:
         )
 
         if not plan.steps:
-            async for event in self._run_conversational(user_message):
+            async for event in self._run_conversational(user_message, self._scoped_dataset_ids):
                 yield event
             return
 
@@ -367,17 +381,26 @@ class Supervisor:
     # Dynamic tool-use loop — Claude decides which tools to call
 
     async def _run_conversational(
-        self, user_message: str,
+        self,
+        user_message: str,
+        dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         async for event in self._executor.execute_dynamic(
-            user_message, self.context, self.memory
+            user_message,
+            self.context,
+            self.memory,
+            dataset_ids=dataset_ids,
         ):
             yield event
 
     # ─── Planning ─────────────────────────────────────────────────────
 
     async def _plan(self, message: str) -> AnalysisPlan:
-        return await self._planner.create_plan(message, self.context)
+        return await self._planner.create_plan(
+            message,
+            self.context,
+            dataset_ids=self._scoped_dataset_ids,
+        )
 
     # ─── Synthesis ────────────────────────────────────────────────────
 
@@ -435,7 +458,7 @@ class Supervisor:
                 "FIRST sentence = the answer (a number or finding). No preamble. "
                 "You have REAL data in the results — cite actual numbers, means, p-values, row counts. "
                 "Bold key values with **markdown**. "
-                "For SQL: show the query in a ```sql block, then results as a markdown table. "
+                "For SQL: If user asked for ONLY the query (e.g. 'just the query', 'SQL only', 'that\\'s all'), output ONLY the ```sql block. Otherwise show query + results table. "
                 "NEVER say 'Phase 1', tool names, 'Based on my analysis', or 'Let me'. "
                 "NEVER add 'Next Steps' or 'Recommendations' unless asked. "
                 "3-6 sentences max. Every sentence must contain a specific number."
@@ -483,7 +506,9 @@ class Supervisor:
 
     def _build_system_prompt(self) -> str:
         return SUPERVISOR_SYSTEM_PROMPT.format(
-            dataset_summaries=self.context.get_dataset_summaries(),
+            dataset_summaries=self.context.get_dataset_summaries(
+                limit_to_ids=self._scoped_dataset_ids
+            ),
             recent_results=self.context.get_recent_results_summary(),
             capabilities_summary=self._registry.get_capabilities_summary(),
         )

@@ -132,11 +132,22 @@ class AnalysisContext:
     def get_variable(self, name: str, default: Any = None) -> Any:
         return self.variables.get(name, default)
 
-    def get_dataset_summaries(self) -> str:
-        """All dataset schemas as text — injected into LLM prompts."""
+    def get_dataset_summaries(self, limit_to_ids: list[str] | None = None) -> str:
+        """All dataset schemas as text — injected into LLM prompts.
+
+        When limit_to_ids is provided (from frontend selection), only those datasets
+        are included. This prevents the planner from picking the wrong dataset when
+        multiple files are uploaded.
+        """
         if not self.schemas:
             return "No datasets loaded."
-        return "\n\n".join(s.to_summary() for s in self.schemas.values())
+        schemas = self.schemas.values()
+        if limit_to_ids:
+            limit_set = set(limit_to_ids)
+            schemas = [s for s in schemas if s.dataset_id in limit_set]
+            if not schemas:
+                return "No datasets loaded."
+        return "\n\n".join(s.to_summary() for s in schemas)
 
     def get_recent_results_summary(self, limit: int = 10) -> str:
         """Last N results as text — injected into LLM prompts for continuity."""

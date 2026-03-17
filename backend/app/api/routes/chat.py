@@ -89,6 +89,7 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                 continue
 
             user_message = payload.get("message", "")
+            dataset_ids = payload.get("dataset_ids") or []
 
             # ── Generate trace_id and bind context for this message ──
             trace_id = generate_trace_id()
@@ -118,7 +119,7 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
             assistant_content = ""
 
             try:
-                async for event in supervisor.run(user_message, trace_id=trace_id):
+                async for event in supervisor.run(user_message, trace_id=trace_id, dataset_ids=dataset_ids or None):
                     await websocket.send_text(event.model_dump_json())
 
                     if event.event_type == StreamEventType.FINAL_RESPONSE:
@@ -165,7 +166,7 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                     event_type=StreamEventType.ERROR,
                     data={
                         "error": str(exc),
-                        "summary": "An unexpected error occurred during analysis.",
+                        "summary": str(exc),
                     },
                     trace_id=trace_id,
                 )

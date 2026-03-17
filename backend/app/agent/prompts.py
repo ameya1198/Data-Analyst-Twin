@@ -141,14 +141,16 @@ Return a JSON object with this structure:
 
 Guidelines:
 - CRITICAL: Every tool_params MUST include "dataset_id" using the exact dataset_id shown in the Available Data section (e.g. "dataset_id": "ee053ce7"). Do NOT use the filename as dataset_id.
-- If only one dataset is loaded, use its dataset_id for all steps.
+- **Single dataset**: When Available Data lists exactly ONE dataset, use its dataset_id for ALL steps. Do not reference any other dataset. The user's questions are about this dataset only.
 - Start with eda_profile if first analysis. NEVER skip Phase 1.
 - If quality < 70, insert eda_smart_structure before Phase 2/3.
 - Follow phase order: Overview → Univariate → Bivariate → Multivariate → Temporal → Viz.
-- For Descriptive questions: focus on Phases 1-2 + visualization.
+- For Descriptive questions: focus on Phases 1-2 + visualization. When the user asks for descriptive statistics (mean, median, std, skewness, etc.), include eda_describe — eda_profile gives an overview but eda_describe provides full statistical measures (mean, median, std, skewness, kurtosis) per numeric column.
 - For Diagnostic questions: must include Phase 3 (bivariate/correlations).
+- **When the user explicitly requests a chart, graph, or visualization** (e.g. "bar chart", "line chart", "show me a chart"), the plan MUST include a viz_* step. Use sql_execute first if you need aggregated data (e.g. top 10 by sum/avg), then pass that result to viz_bar_chart via a saved dataset, or use viz_bar_chart on the main dataset with x=category, y=metric. Do NOT stop at SQL—always add the viz step.
 - Keep plans focused. 3-6 steps is typical.
 - If ambiguous, state interpretation and proceed with most likely intent.
+- **Chart requests**: When the user asks for a chart/graph/visualization, you MUST include a viz_* step. For aggregated charts (e.g. "top 10 X by Y"): (1) sql_execute the aggregation with save_as to store the result, (2) viz_bar_chart (or viz_line_chart) with dataset_id=that saved result, x=categorical column, y=numeric column.
 
 User question: {user_message}
 """
@@ -209,7 +211,7 @@ Rules — FOLLOW STRICTLY:
 
 1. **Lead with the answer** — the key number or finding FIRST. Never start with "I analyzed" or "Based on the analysis."
 2. **Use the real numbers above** — you have actual means, p-values, row counts, correlation values. CITE THEM with markdown bold.
-3. **For SQL** — show the executed query in a ```sql block, then the result rows as a markdown table. Nothing else.
+3. **For SQL** — When the user asks for ONLY the query (e.g. "just the query", "give me the SQL", "SQL only", "that's all"), respond with ONLY the query in a ```sql block. No summary, no results, no interpretation. Otherwise, show the query in a ```sql block, then the result rows as a markdown table.
 4. **For statistics** — state the finding and bold the p-value, effect size, and test name. One sentence for what it means.
 5. **For EDA/profiling** — pick the 2-3 most interesting findings and cite specific numbers. Skip obvious things like "the dataset has N rows."
 6. **For visualizations** — describe what the chart reveals, not that a chart was generated.

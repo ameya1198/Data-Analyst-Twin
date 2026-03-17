@@ -71,10 +71,13 @@ class Planner:
         self._registry = registry
 
     async def create_plan(
-        self, user_message: str, context: AnalysisContext
+        self,
+        user_message: str,
+        context: AnalysisContext,
+        dataset_ids: list[str] | None = None,
     ) -> AnalysisPlan:
         system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(
-            dataset_summaries=context.get_dataset_summaries(),
+            dataset_summaries=context.get_dataset_summaries(limit_to_ids=dataset_ids),
             recent_results=context.get_recent_results_summary(),
             capabilities_summary=self._registry.get_capabilities_summary(),
         )

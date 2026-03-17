@@ -207,14 +207,18 @@ class Executor:
         user_message: str,
         context: AnalysisContext,
         memory: ConversationMemory,
+        dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """
         Dynamic tool-use loop — Claude decides which tools to call.
         Used as fallback when the planner can't produce a structured plan,
         or for follow-up questions within a conversation.
+
+        When dataset_ids is provided (from frontend selection), only those
+        datasets are included in the system prompt.
         """
         system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(
-            dataset_summaries=context.get_dataset_summaries(),
+            dataset_summaries=context.get_dataset_summaries(limit_to_ids=dataset_ids),
             recent_results=context.get_recent_results_summary(),
             capabilities_summary=self._registry.get_capabilities_summary(),
         )

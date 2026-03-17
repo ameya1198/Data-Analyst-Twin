@@ -72,7 +72,9 @@ class SpecialistResult:
                 for cp in self.data["column_profiles"][:8]:
                     line = f"  - {cp.get('name')}: {cp.get('dtype')}"
                     if cp.get("mean") is not None:
-                        line += f", mean={cp['mean']}, std={cp.get('std', '?')}"
+                        line += f", mean={cp['mean']}, median={cp.get('median', '?')}, std={cp.get('std', '?')}"
+                        if cp.get("min") is not None and cp.get("max") is not None:
+                            line += f", range=[{cp['min']}, {cp['max']}]"
                     if cp.get("null_pct", 0) > 0:
                         line += f", {cp['null_pct']}% null"
                     if cp.get("unique") is not None:
@@ -118,16 +120,31 @@ class SpecialistResult:
                     if isinstance(ch, dict):
                         parts.append(f"    - {ch.get('action', '?')}: {ch.get('detail', '')}")
 
-            if "descriptions" in self.data and isinstance(self.data["descriptions"], list):
-                for desc in self.data["descriptions"][:6]:
-                    if isinstance(desc, dict):
-                        line = f"  - {desc.get('column', '?')}"
-                        if desc.get("mean") is not None:
-                            line += f": mean={desc['mean']}, median={desc.get('median', '?')}, std={desc.get('std', '?')}"
-                        if desc.get("top_values"):
-                            top = desc["top_values"][:3]
-                            line += f", top: {top}"
-                        parts.append(line)
+            if "descriptions" in self.data:
+                descs = self.data["descriptions"]
+                items: list[tuple[str, dict]] = []
+                if isinstance(descs, dict):
+                    items = list(descs.items())[:8]
+                elif isinstance(descs, list):
+                    items = [(d.get("column", "?"), d) for d in descs[:8] if isinstance(d, dict)]
+                for col, desc in items:
+                    if not isinstance(desc, dict):
+                        continue
+                    line = f"  - {col}"
+                    if desc.get("mean") is not None:
+                        line += f": mean={desc['mean']}, median={desc.get('median', '?')}, std={desc.get('std', '?')}"
+                        if desc.get("skewness") is not None:
+                            line += f", skewness={desc['skewness']}"
+                        if desc.get("kurtosis") is not None:
+                            line += f", kurtosis={desc['kurtosis']}"
+                        if desc.get("min") is not None and desc.get("max") is not None:
+                            line += f", range=[{desc['min']}, {desc['max']}]"
+                    elif desc.get("top_values"):
+                        top = list(desc["top_values"].items())[:5] if isinstance(desc["top_values"], dict) else desc["top_values"][:5]
+                        line += f": categorical, top values: {top}"
+                    elif desc.get("type"):
+                        line += f" ({desc['type']})"
+                    parts.append(line)
 
         return "\n".join(parts)
 
