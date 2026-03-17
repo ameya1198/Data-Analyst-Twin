@@ -86,6 +86,24 @@ class ConversationMemory:
     def has_history(self) -> bool:
         return len(self._messages) > 0
 
+    def load_history(self, messages: list[tuple[str, str]]) -> int:
+        """
+        Seed memory from persisted (role, content) pairs.
+
+        Only loads user/assistant text messages — skips tool_result entries
+        which cannot be meaningfully replayed without their tool_use context.
+
+        Returns the number of messages loaded.
+        """
+        loaded = 0
+        for role, content in messages:
+            if role not in ("user", "assistant") or not content:
+                continue
+            self._messages.append(Message(role=role, content=content))
+            loaded += 1
+        self._trim()
+        return loaded
+
     def clear(self) -> None:
         self._messages.clear()
 

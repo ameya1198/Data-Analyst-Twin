@@ -26,6 +26,7 @@ statsmodels>=0.14.0
 # Database (Phase 3, but SQLite session storage needs this now)
 sqlalchemy>=2.0.0
 aiosqlite>=0.20.0
+greenlet>=3.0.0
 
 # Observability
 structlog>=24.4.0

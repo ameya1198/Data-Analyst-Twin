@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import numpy as np
 import pandas as pd
 import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 from app.agent.specialists.context import AnalysisContext
 from app.agent.specialists.base import SpecialistRegistry
@@ -14,6 +18,7 @@ from app.agent.specialists.sql import SQLSpecialist
 from app.agent.specialists.stats import StatsSpecialist
 from app.agent.specialists.viz import VizSpecialist
 from app.agent.error_recovery import ErrorRecoveryMiddleware
+from app.database import Base
 
 
 @pytest.fixture
@@ -230,3 +235,69 @@ def registry(eda: EDASpecialist, viz: VizSpecialist, sql: SQLSpecialist, stats: 
 @pytest.fixture
 def middleware(registry: SpecialistRegistry) -> ErrorRecoveryMiddleware:
     return ErrorRecoveryMiddleware(registry, max_retries=1, base_delay=0.01)
+
+
+# ─── Database fixtures (in-memory SQLite) ────────────────────────────────────
+
+
+@pytest.fixture
+async def db_engine():
+    """In-memory async SQLAlchemy engine for test isolation."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+@pytest.fixture
+async def db_session(db_engine):
+    """Async session factory bound to the in-memory engine."""
+    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    yield factory
+
+
+# ─── FastAPI TestClient ──────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def test_app():
+    """httpx AsyncClient wrapping the FastAPI app (no lifespan)."""
+    from app.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
+
+# ─── Mock Anthropic Client ───────────────────────────────────────────────────
+
+
+@pytest.fixture
+def mock_anthropic():
+    """
+    Mocked AsyncAnthropic client that returns canned text responses.
+
+    Usage:
+        supervisor._client = mock_anthropic
+        mock_anthropic.messages.create.return_value = _make_response("text")
+    """
+    client = AsyncMock()
+
+    content_block = MagicMock()
+    content_block.text = "Mock response from Claude."
+    content_block.type = "text"
+
+    usage = MagicMock()
+    usage.input_tokens = 50
+    usage.output_tokens = 25
+
+    response = MagicMock()
+    response.content = [content_block]
+    response.usage = usage
+    response.stop_reason = "end_turn"
+
+    client.messages.create = AsyncMock(return_value=response)
+    return client

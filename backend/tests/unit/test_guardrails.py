@@ -240,56 +240,61 @@ class TestConfirmationManager:
         return ConfirmationManager(timeout_seconds=1)
 
     def test_needs_confirmation(self, manager):
-        assert manager.needs_confirmation("data_cleaning", "clean_drop_nulls")
-        assert manager.needs_confirmation("sql", "sql_execute_write")
+        assert manager.needs_confirmation("cleaning", "clean_structural")
+        assert manager.needs_confirmation("cleaning", "clean_deduplicate")
+        assert manager.needs_confirmation("cleaning", "clean_missing")
+        assert manager.needs_confirmation("cleaning", "clean_standardise")
+        assert manager.needs_confirmation("cleaning", "clean_derive")
+        assert not manager.needs_confirmation("cleaning", "clean_validate")
         assert not manager.needs_confirmation("eda", "eda_profile")
         assert not manager.needs_confirmation("viz", "viz_bar_chart")
 
     async def test_confirmation_approved(self, manager):
-        sent_requests = []
+        manager.create_pending("req1")
 
-        async def mock_send(request):
-            sent_requests.append(request)
-            manager.resolve(request.request_id, approved=True)
+        async def approve():
+            manager.resolve("req1", approved=True)
 
-        request = ConfirmationRequest(
-            request_id="req1", specialist_name="data_cleaning",
-            tool_name="clean_drop_nulls",
-            description="Drop 50 null rows", details={}, impact="Removes 50 rows",
-        )
-
-        response = await manager.request_confirmation(request, mock_send)
+        import asyncio
+        asyncio.get_event_loop().call_soon(lambda: manager.resolve("req1", approved=True))
+        response = await manager.wait_for("req1")
         assert response.approved
-        assert len(sent_requests) == 1
 
     async def test_confirmation_denied(self, manager):
-        async def mock_send(request):
-            manager.resolve(request.request_id, approved=False, message="Too risky")
+        manager.create_pending("req2")
 
-        request = ConfirmationRequest(
-            request_id="req2", specialist_name="sql",
-            tool_name="sql_execute_write",
-            description="DELETE query", details={}, impact="Deletes rows",
+        import asyncio
+        asyncio.get_event_loop().call_soon(
+            lambda: manager.resolve("req2", approved=False, message="Too risky"),
         )
-
-        response = await manager.request_confirmation(request, mock_send)
+        response = await manager.wait_for("req2")
         assert not response.approved
         assert response.user_message == "Too risky"
 
     async def test_confirmation_timeout(self, manager):
-        async def mock_send(request):
-            pass  # Don't resolve — triggers timeout
-
-        request = ConfirmationRequest(
-            request_id="req3", specialist_name="data_cleaning",
-            tool_name="clean_drop_nulls",
-            description="Drop nulls", details={}, impact="Removes rows",
-        )
-
-        response = await manager.request_confirmation(request, mock_send)
+        manager.create_pending("req3")
+        response = await manager.wait_for("req3")
         assert not response.approved
         assert "timed out" in response.user_message.lower()
 
     def test_resolve_nonexistent_request(self, manager):
         result = manager.resolve("nonexistent", approved=True)
         assert result is False
+
+    def test_build_request(self, manager):
+        request = manager.build_request(
+            "cleaning", "clean_missing",
+            {"dataset_id": "ds1", "strategy": "drop"},
+        )
+        assert request.tool_name == "clean_missing"
+        assert request.specialist_name == "cleaning"
+        assert "missing" in request.impact.lower()
+        assert request.details["dataset_id"] == "ds1"
+        assert request.details["strategy"] == "drop"
+
+    async def test_has_pending(self, manager):
+        assert not manager.has_pending
+        manager.create_pending("req4")
+        assert manager.has_pending
+        manager.resolve("req4", approved=True)
+        assert not manager.has_pending

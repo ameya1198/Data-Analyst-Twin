@@ -1,31 +1,52 @@
 """
 Human-in-the-loop confirmation — requires user approval for destructive operations.
 
-Specialists that modify data (cleaning, SQL writes) must go through this layer.
+Specialists that modify data (cleaning) must go through this layer.
 The confirmation request is sent via WebSocket and blocks until the user responds.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
-# Specialists whose operations require user confirmation
-CONFIRMATION_REQUIRED = {
-    "data_cleaning": [
-        "clean_drop_nulls",
-        "clean_drop_duplicates",
-        "clean_fill_nulls",
-        "clean_cast_types",
+CONFIRMATION_REQUIRED: dict[str, list[str]] = {
+    "cleaning": [
+        "clean_structural",
+        "clean_deduplicate",
+        "clean_missing",
+        "clean_standardise",
+        "clean_derive",
     ],
-    "sql": [
-        "sql_execute_write",
-    ],
+}
+
+TOOL_IMPACT_DESCRIPTIONS: dict[str, str] = {
+    "clean_structural": (
+        "Normalize column names, fix data types, and strip whitespace. "
+        "A new copy of the dataset will be created — the original stays untouched."
+    ),
+    "clean_deduplicate": (
+        "Detect and remove duplicate rows from the dataset. "
+        "A new deduplicated copy will be created."
+    ),
+    "clean_missing": (
+        "Handle missing values by imputing, dropping, or flagging them. "
+        "A new copy with treated missing values will be created."
+    ),
+    "clean_standardise": (
+        "Standardize text (lowercase, trim), parse dates, and apply category mappings. "
+        "A new standardized copy will be created."
+    ),
+    "clean_derive": (
+        "Create new derived columns (date parts, bins, flags, calculated features). "
+        "A new copy with additional columns will be created."
+    ),
 }
 
 
@@ -36,7 +57,17 @@ class ConfirmationRequest:
     tool_name: str
     description: str
     details: dict[str, Any]
-    impact: str  # What will be affected
+    impact: str
+
+    def to_stream_data(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "specialist_name": self.specialist_name,
+            "tool_name": self.tool_name,
+            "description": self.description,
+            "details": self.details,
+            "impact": self.impact,
+        }
 
 
 @dataclass
@@ -61,57 +92,78 @@ class ConfirmationManager:
         self._timeout = timeout_seconds
 
     def needs_confirmation(self, specialist_name: str, tool_name: str) -> bool:
-        """Check if a tool call requires user confirmation."""
         tools = CONFIRMATION_REQUIRED.get(specialist_name, [])
         return tool_name in tools
 
-    async def request_confirmation(
+    def build_request(
         self,
-        request: ConfirmationRequest,
-        send_callback: Any,
-    ) -> ConfirmationResponse:
-        """
-        Send a confirmation request and wait for user response.
+        specialist_name: str,
+        tool_name: str,
+        params: dict[str, Any],
+    ) -> ConfirmationRequest:
+        impact = TOOL_IMPACT_DESCRIPTIONS.get(
+            tool_name,
+            "This operation will modify the dataset. A new copy will be created.",
+        )
+        dataset_id = params.get("dataset_id", "unknown")
+        details: dict[str, Any] = {"dataset_id": dataset_id}
 
-        Args:
-            request: The confirmation details
-            send_callback: Async function to send the request to the frontend
-        """
-        future: asyncio.Future[ConfirmationResponse] = asyncio.get_event_loop().create_future()
-        self._pending[request.request_id] = future
+        if tool_name == "clean_deduplicate":
+            details["strategy"] = params.get("strategy", "keep_first")
+        elif tool_name == "clean_missing":
+            details["strategy"] = params.get("strategy", "auto")
+            details["columns"] = params.get("columns", "all")
+        elif tool_name == "clean_derive":
+            details["operations"] = params.get("operations", [])
 
-        logger.info(
-            "confirmation_requested",
-            request_id=request.request_id,
-            specialist=request.specialist_name,
-            tool=request.tool_name,
+        human_name = tool_name.replace("clean_", "").replace("_", " ").title()
+
+        return ConfirmationRequest(
+            request_id=str(uuid.uuid4()),
+            specialist_name=specialist_name,
+            tool_name=tool_name,
+            description=f"Data Cleaning: {human_name}",
+            details=details,
+            impact=impact,
         )
 
-        await send_callback(request)
+    def create_pending(self, request_id: str) -> None:
+        """Create a Future for a pending confirmation request."""
+        loop = asyncio.get_running_loop()
+        self._pending[request_id] = loop.create_future()
+
+    async def wait_for(self, request_id: str) -> ConfirmationResponse:
+        """Block until the confirmation response arrives or times out."""
+        future = self._pending.get(request_id)
+        if future is None:
+            return ConfirmationResponse(
+                request_id=request_id,
+                approved=False,
+                user_message="No pending confirmation found.",
+            )
 
         try:
             response = await asyncio.wait_for(future, timeout=self._timeout)
             logger.info(
                 "confirmation_received",
-                request_id=request.request_id,
+                request_id=request_id,
                 approved=response.approved,
             )
             return response
         except asyncio.TimeoutError:
             logger.warning(
                 "confirmation_timeout",
-                request_id=request.request_id,
+                request_id=request_id,
                 timeout=self._timeout,
             )
-            self._pending.pop(request.request_id, None)
+            self._pending.pop(request_id, None)
             return ConfirmationResponse(
-                request_id=request.request_id,
+                request_id=request_id,
                 approved=False,
-                user_message="Confirmation timed out",
+                user_message="Confirmation timed out — operation cancelled.",
             )
 
     def resolve(self, request_id: str, approved: bool, message: str | None = None) -> bool:
-        """Called when the frontend sends a confirmation response."""
         future = self._pending.pop(request_id, None)
         if future is None:
             logger.warning("confirmation_resolve_not_found", request_id=request_id)
@@ -123,3 +175,7 @@ class ConfirmationManager:
             user_message=message,
         ))
         return True
+
+    @property
+    def has_pending(self) -> bool:
+        return len(self._pending) > 0

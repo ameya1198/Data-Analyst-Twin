@@ -243,6 +243,10 @@ class CleaningSpecialist(BaseSpecialist):
     async def _execute_tool_mode(
         self, tool_name: str, params: dict, context: AnalysisContext
     ) -> SpecialistResult:
+        raw_id = params.get("dataset_id") or params.get("dataset_name") or ""
+        resolved = context.resolve_dataset_id(raw_id) or raw_id
+        params = {**params, "dataset_id": resolved}
+
         dispatch = {
             "clean_structural": self._structural,
             "clean_deduplicate": self._deduplicate,

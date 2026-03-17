@@ -140,6 +140,8 @@ Return a JSON object with this structure:
 }}
 
 Guidelines:
+- CRITICAL: Every tool_params MUST include "dataset_id" using the exact dataset_id shown in the Available Data section (e.g. "dataset_id": "ee053ce7"). Do NOT use the filename as dataset_id.
+- If only one dataset is loaded, use its dataset_id for all steps.
 - Start with eda_profile if first analysis. NEVER skip Phase 1.
 - If quality < 70, insert eda_smart_structure before Phase 2/3.
 - Follow phase order: Overview → Univariate → Bivariate → Multivariate → Temporal → Viz.
@@ -203,20 +205,16 @@ FOCUSED_SYNTHESIS_PROMPT = """The user asked: {user_message}
 Here are the raw analysis results:
 {results_summary}
 
-Transform these raw results into a clear, insightful response that a non-technical person can understand.
+Give a SHORT, direct answer. Rules:
 
-Guidelines:
-- **Lead with the key insight** — what's the most important thing the user should know?
-- **Use specific numbers with context** — "$85K mean salary (ranging $68K–$110K)" not "salary data was analyzed"
-- **Use bullet points** for multiple findings — keep each point to 1-2 sentences
-- **Bold important numbers and findings** using markdown
-- **Explain what patterns mean** — don't just list statistics, interpret them ("Revenue is heavily right-skewed, meaning most values cluster low but a few very large values pull the average up")
-- **Flag issues clearly** — data quality problems, outliers, missing data, with plain-English explanations
-- **Suggest 1-2 concrete next steps** — what should the user explore next?
-- **Never show raw internal labels** like "[Phase 1: Dataset Overview]" or tool names
-- Write in a warm, professional tone — like a colleague explaining findings over coffee
-
-Keep the response focused and readable — aim for 4-12 sentences depending on complexity."""
+1. **Lead with the answer** — the key number, finding, or result first. No preamble.
+2. **For SQL queries** — show the SQL that was executed in a code block, then the result (table or number). That's it.
+3. **For statistics** — state the finding, the key numbers (bolded), and what it means in one sentence.
+4. **For EDA** — summarize the 2-3 most important findings with specific numbers.
+5. **Bold important numbers** — use markdown bold for key values.
+6. Never show internal labels, tool names, or phase numbers.
+7. Never give instructions like "replace your_table_name" — you have the real data, use it.
+8. Keep it to 3-8 sentences max. No "Alternative Approaches" or "Next Steps" sections unless the user asked."""
 
 SYNTHESIZER_PROMPT = """You are synthesizing the analysis results into a clear, insightful response for the user.
 

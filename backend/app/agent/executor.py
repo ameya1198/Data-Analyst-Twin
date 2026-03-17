@@ -25,9 +25,10 @@ from app.agent.error_recovery import ErrorRecoveryMiddleware, RecoveryEvent
 from app.agent.memory import ConversationMemory
 from app.agent.planner import AnalysisPlan, AnalysisStep
 from app.agent.prompts import SUPERVISOR_SYSTEM_PROMPT
-from app.agent.specialists.base import SpecialistRegistry, SpecialistResult
+from app.agent.specialists.base import ResultType, SpecialistRegistry, SpecialistResult
 from app.agent.specialists.context import AnalysisContext
 from app.config import settings
+from app.guardrails.confirmation import ConfirmationManager
 from app.models.schemas import StreamEvent, StreamEventType
 
 logger = structlog.get_logger(__name__)
@@ -59,15 +60,70 @@ class Executor:
         registry: SpecialistRegistry,
         middleware: ErrorRecoveryMiddleware | None = None,
         max_tool_calls: int = 15,
+        confirmation_manager: ConfirmationManager | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
         self._middleware = middleware or ErrorRecoveryMiddleware(registry)
         self._max_tool_calls = max_tool_calls
+        self._confirmation_manager = confirmation_manager
 
     @property
     def middleware(self) -> ErrorRecoveryMiddleware:
         return self._middleware
+
+    async def _check_confirmation(
+        self,
+        tool_name: str,
+        params: dict,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """
+        If the tool requires human-in-the-loop confirmation, yield a
+        CONFIRMATION_REQUEST event and block until the user responds.
+
+        Yields either nothing (no confirmation needed, or approved) or a
+        specialist_result with cancellation.
+        """
+        if not self._confirmation_manager:
+            return
+
+        specialist = self._registry.get_specialist_for_tool(tool_name)
+        if not specialist:
+            return
+
+        if not self._confirmation_manager.needs_confirmation(specialist.name, tool_name):
+            return
+
+        request = self._confirmation_manager.build_request(
+            specialist.name, tool_name, params,
+        )
+        self._confirmation_manager.create_pending(request.request_id)
+
+        yield StreamEvent(
+            event_type=StreamEventType.CONFIRMATION_REQUEST,
+            data=request.to_stream_data(),
+            specialist_name=specialist.name,
+        )
+
+        response = await self._confirmation_manager.wait_for(request.request_id)
+
+        if not response.approved:
+            reason = response.user_message or "Operation cancelled by user."
+            logger.info(
+                "operation_rejected_by_user",
+                tool=tool_name,
+                request_id=request.request_id,
+            )
+            yield StreamEvent(
+                event_type=StreamEventType.SPECIALIST_RESULT,
+                data={
+                    "result_type": ResultType.ERROR.value,
+                    "summary": reason,
+                    "data": None,
+                    "user_cancelled": True,
+                },
+                specialist_name=specialist.name,
+            )
 
     async def execute_plan(
         self,
@@ -81,6 +137,21 @@ class Executor:
         execution = ExecutionResult()
 
         for step in plan.steps:
+            # Human-in-the-loop confirmation for destructive operations
+            cancelled = False
+            async for conf_event in self._check_confirmation(step.tool_name, step.tool_params):
+                yield conf_event
+                if (
+                    conf_event.event_type == StreamEventType.SPECIALIST_RESULT
+                    and isinstance(conf_event.data, dict)
+                    and conf_event.data.get("user_cancelled")
+                ):
+                    cancelled = True
+
+            if cancelled:
+                execution.skipped_steps.append(step.tool_name)
+                continue
+
             yield StreamEvent(
                 event_type=StreamEventType.SPECIALIST_CALL,
                 data={
@@ -177,6 +248,26 @@ class Executor:
                     if block.type == "tool_use":
                         tool_call_count += 1
 
+                        # Human-in-the-loop confirmation
+                        cancelled = False
+                        async for conf_event in self._check_confirmation(
+                            block.name, block.input if isinstance(block.input, dict) else {},
+                        ):
+                            yield conf_event
+                            if (
+                                conf_event.event_type == StreamEventType.SPECIALIST_RESULT
+                                and isinstance(conf_event.data, dict)
+                                and conf_event.data.get("user_cancelled")
+                            ):
+                                cancelled = True
+
+                        if cancelled:
+                            tool_results.append({
+                                "tool_use_id": block.id,
+                                "content": "Operation cancelled by user.",
+                            })
+                            continue
+
                         yield StreamEvent(
                             event_type=StreamEventType.SPECIALIST_CALL,
                             data={
@@ -259,9 +350,30 @@ class Executor:
 
     def _serialize_result_data(self, result: SpecialistResult) -> Any:
         """Make result data JSON-serializable for streaming."""
-        data = result.data
-        if data is None:
+        return _sanitize_for_json(result.data)
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Recursively convert numpy/pandas types to native Python for JSON serialization."""
+    import numpy as np
+
+    if obj is None:
+        return None
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        v = float(obj)
+        if np.isnan(v) or np.isinf(v):
             return None
-        if isinstance(data, (str, int, float, bool, list, dict)):
-            return data
-        return str(data)[:2000]
+        return v
+    if isinstance(obj, np.ndarray):
+        return [_sanitize_for_json(x) for x in obj.tolist()]
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(x) for x in obj]
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    return str(obj)[:2000]

@@ -41,6 +41,7 @@ from app.agent.reflector import Reflector
 from app.agent.specialists.base import ResultType, SpecialistRegistry, SpecialistResult
 from app.agent.specialists.context import AnalysisContext
 from app.config import settings
+from app.guardrails.confirmation import ConfirmationManager
 from app.models.schemas import StreamEvent, StreamEventType
 
 logger = structlog.get_logger(__name__)
@@ -67,6 +68,7 @@ class Supervisor:
         self.memory = ConversationMemory()
 
         self._middleware = ErrorRecoveryMiddleware(registry)
+        self._confirmation_manager = ConfirmationManager()
         self._intent_classifier = IntentClassifier()
         self._planner = Planner(self._client, registry)
         self._executor = Executor(
@@ -74,9 +76,35 @@ class Supervisor:
             registry,
             middleware=self._middleware,
             max_tool_calls=max_tool_calls_per_turn or settings.max_specialist_calls_per_turn,
+            confirmation_manager=self._confirmation_manager,
         )
         self._reflector = Reflector(self._client, registry)
         self._max_reflect_cycles = max_reflect_cycles
+
+    @property
+    def confirmation_manager(self) -> ConfirmationManager:
+        return self._confirmation_manager
+
+    async def reload_memory(self, session_id: str) -> int:
+        """
+        Load persisted conversation history from SQLite into memory.
+
+        Called once when a supervisor is first created for a returning session,
+        so the agent remembers past interactions even after a server restart.
+        Returns the number of messages loaded.
+        """
+        from app.database import load_messages
+
+        rows = await load_messages(session_id)
+        pairs = [(r.role, r.content or "") for r in rows]
+        loaded = self.memory.load_history(pairs)
+        if loaded:
+            logger.info(
+                "memory_reloaded",
+                session_id=session_id,
+                messages_loaded=loaded,
+            )
+        return loaded
 
     async def run(self, user_message: str) -> AsyncGenerator[StreamEvent, None]:
         """
@@ -378,11 +406,12 @@ class Supervisor:
             model=settings.anthropic_model,
             max_tokens=2048,
             system=(
-                "You are a friendly, senior data analyst explaining findings to a colleague. "
-                "Transform raw analysis output into clear, human-readable insights. "
-                "Use markdown formatting — bold key numbers, use bullet points for multiple findings. "
-                "Never show internal tool names, phase labels, or raw technical output. "
-                "Interpret what the numbers mean in plain English. Lead with the most important finding."
+                "You are a data analyst giving concise answers. "
+                "Lead with the answer — the key number or finding. No preamble, no filler. "
+                "For SQL: show the query in a code block, then the result. "
+                "Bold important numbers. Keep it to 3-8 sentences max. "
+                "Never show internal tool names, phase labels, or template placeholders. "
+                "You have real data — always use the actual table names and column names."
             ),
             messages=[{"role": "user", "content": synth_message}],
         )
@@ -445,9 +474,5 @@ class Supervisor:
         return None
 
     def _serialize_result_data(self, result: SpecialistResult):
-        data = result.data
-        if data is None:
-            return None
-        if isinstance(data, (str, int, float, bool, list, dict)):
-            return data
-        return str(data)[:2000]
+        from app.agent.executor import _sanitize_for_json
+        return _sanitize_for_json(result.data)

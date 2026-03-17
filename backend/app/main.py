@@ -1,5 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
+import io
+import json
 
+import pandas as pd
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.middleware import RequestLoggingMiddleware
 from app.api.routes import chat, data, sessions
 from app.config import settings
+from app.database import init_db, load_all_datasets
 
 
 structlog.configure(
@@ -24,6 +29,14 @@ structlog.configure(
 
 logger = structlog.get_logger(__name__)
 
+READERS = {
+    "csv": lambda buf: pd.read_csv(buf),
+    "xlsx": lambda buf: pd.read_excel(buf, engine="openpyxl"),
+    "xls": lambda buf: pd.read_excel(buf, engine="openpyxl"),
+    "json": lambda buf: pd.read_json(buf),
+    "parquet": lambda buf: pd.read_parquet(buf),
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +47,35 @@ async def lifespan(app: FastAPI):
         port=settings.app_port,
         cors_origins=settings.cors_origin_list,
     )
-    settings.upload_path  # ensure upload dir exists
+    settings.upload_path
+
+    await init_db()
+
+    ctx = data.get_context()
+    saved_datasets = await load_all_datasets()
+    reloaded = 0
+    for ds in saved_datasets:
+        file_path = Path(ds.file_path)
+        if not file_path.exists():
+            logger.warning("dataset_file_missing", dataset_id=ds.id, path=str(file_path))
+            continue
+
+        ext = ds.filename.rsplit(".", 1)[-1].lower() if "." in ds.filename else ""
+        reader = READERS.get(ext)
+        if reader is None:
+            logger.warning("dataset_unsupported_ext", dataset_id=ds.id, ext=ext)
+            continue
+
+        try:
+            df = reader(file_path)
+            ctx.add_dataset(ds.id, df, ds.filename)
+            reloaded += 1
+        except Exception as e:
+            logger.warning("dataset_reload_failed", dataset_id=ds.id, error=str(e))
+
+    if reloaded:
+        logger.info("datasets_reloaded", count=reloaded, total=len(saved_datasets))
+
     yield
     logger.info("shutdown")
 

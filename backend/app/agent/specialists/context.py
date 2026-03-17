@@ -42,7 +42,8 @@ class DataSchema:
             f"{c.name} ({c.dtype}, {c.null_pct:.0f}% null)" for c in self.columns
         )
         return (
-            f"Dataset '{self.filename}': {self.row_count} rows x {self.column_count} columns. "
+            f"Dataset '{self.filename}' (dataset_id='{self.dataset_id}'): "
+            f"{self.row_count} rows x {self.column_count} columns. "
             f"Columns: [{col_desc}]"
         )
 
@@ -147,6 +148,17 @@ class AnalysisContext:
             data_preview = str(r.data)[:200] if r.data is not None else "None"
             lines.append(f"[{r.specialist_name}] {r.step_description}: {data_preview}")
         return "\n".join(lines)
+
+    def resolve_dataset_id(self, identifier: str) -> str | None:
+        """Resolve a dataset_id, dataset_name, or filename to a valid dataset_id."""
+        if identifier in self.datasets:
+            return identifier
+        for did, schema in self.schemas.items():
+            if schema.filename == identifier or schema.filename.lower() == identifier.lower():
+                return did
+        if not identifier and len(self.datasets) == 1:
+            return next(iter(self.datasets))
+        return None
 
     @property
     def dataset_ids(self) -> list[str]:

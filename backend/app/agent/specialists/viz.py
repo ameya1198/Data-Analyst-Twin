@@ -275,7 +275,8 @@ class VizSpecialist(BaseSpecialist):
     async def _execute_tool_mode(
         self, tool_name: str, params: dict, context: AnalysisContext
     ) -> SpecialistResult:
-        dataset_id = params.get("dataset_id", "")
+        raw_id = params.get("dataset_id") or params.get("dataset_name") or ""
+        dataset_id = context.resolve_dataset_id(raw_id) or raw_id
         if dataset_id not in context.datasets:
             return SpecialistResult(
                 success=False, specialist_name=self.name,
