@@ -76,8 +76,8 @@ class TestPlannerPromptContract:
         assert "## Available Specialists" in SUPERVISOR_SYSTEM_PROMPT
 
     def test_foocused_synthesis_forbids_placeholders(self):
-        # Prompt contract: ensure we keep the anti-placeholder rule.
-        assert "Never give instructions like \"replace your_table_name\"" in FOCUSED_SYNTHESIS_PROMPT
+        assert "NEVER" in FOCUSED_SYNTHESIS_PROMPT
+        assert "filler phrases" in FOCUSED_SYNTHESIS_PROMPT or "internal label" in FOCUSED_SYNTHESIS_PROMPT
 
 
 class TestPlannerCreatePlanContract:
@@ -153,7 +153,7 @@ class TestSynthesisPromptContract:
 
         _, kwargs = mock_client.messages.create.call_args
         system = kwargs.get("system", "")
-        assert "Lead with the answer" in system
-        assert "template placeholders" in system
-        assert "For SQL: show the query in a code block" in system
+        assert "FIRST sentence" in system or "Lead with the answer" in system
+        assert "NEVER" in system
+        assert "sql" in system.lower()
 

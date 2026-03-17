@@ -52,10 +52,84 @@ class SpecialistResult:
     latency_ms: float = 0.0
 
     def to_llm_context(self) -> str:
-        """Format result for injection into the next LLM call."""
+        """Format result for injection into the next LLM call.
+
+        Includes key data points so the synthesis LLM can cite real numbers
+        instead of producing vague summaries.
+        """
         if not self.success:
             return f"[{self.specialist_name} ERROR] {self.error}"
-        return f"[{self.specialist_name}] {self.summary}"
+
+        parts = [f"[{self.specialist_name}] {self.summary}"]
+
+        if isinstance(self.data, dict):
+            if "rows" in self.data and "columns" in self.data:
+                parts.append(f"  Shape: {self.data['rows']} rows, {self.data['columns']} cols")
+            if "quality_score" in self.data:
+                parts.append(f"  Quality score: {self.data['quality_score']}/100")
+
+            if "column_profiles" in self.data:
+                for cp in self.data["column_profiles"][:8]:
+                    line = f"  - {cp.get('name')}: {cp.get('dtype')}"
+                    if cp.get("mean") is not None:
+                        line += f", mean={cp['mean']}, std={cp.get('std', '?')}"
+                    if cp.get("null_pct", 0) > 0:
+                        line += f", {cp['null_pct']}% null"
+                    if cp.get("unique") is not None:
+                        line += f", {cp['unique']} unique"
+                    parts.append(line)
+
+            if "correlation_matrix" in self.data:
+                parts.append("  Key correlations:")
+                matrix = self.data["correlation_matrix"]
+                if isinstance(matrix, dict):
+                    seen = set()
+                    for col_a, row in matrix.items():
+                        if isinstance(row, dict):
+                            for col_b, val in row.items():
+                                if col_a != col_b and frozenset((col_a, col_b)) not in seen:
+                                    seen.add(frozenset((col_a, col_b)))
+                                    if isinstance(val, (int, float)) and abs(val) >= 0.3:
+                                        parts.append(f"    {col_a} ↔ {col_b}: {val:.3f}")
+
+            if "query" in self.data:
+                parts.append(f"  SQL: {self.data['query']}")
+            if "preview" in self.data and isinstance(self.data["preview"], list):
+                rows = self.data["preview"][:5]
+                if rows:
+                    parts.append(f"  Result ({self.data.get('row_count', len(rows))} rows):")
+                    for r in rows:
+                        parts.append(f"    {r}")
+
+            if "p_value" in self.data:
+                parts.append(f"  p-value: {self.data['p_value']}")
+            if "test_name" in self.data:
+                parts.append(f"  Test: {self.data['test_name']}")
+            if "effect_size" in self.data:
+                parts.append(f"  Effect size: {self.data['effect_size']}")
+            if "confidence_interval" in self.data:
+                parts.append(f"  95% CI: {self.data['confidence_interval']}")
+            if "interpretation" in self.data:
+                parts.append(f"  Interpretation: {self.data['interpretation']}")
+
+            if "changes" in self.data and isinstance(self.data["changes"], list):
+                parts.append(f"  Changes applied ({len(self.data['changes'])}):")
+                for ch in self.data["changes"][:5]:
+                    if isinstance(ch, dict):
+                        parts.append(f"    - {ch.get('action', '?')}: {ch.get('detail', '')}")
+
+            if "descriptions" in self.data and isinstance(self.data["descriptions"], list):
+                for desc in self.data["descriptions"][:6]:
+                    if isinstance(desc, dict):
+                        line = f"  - {desc.get('column', '?')}"
+                        if desc.get("mean") is not None:
+                            line += f": mean={desc['mean']}, median={desc.get('median', '?')}, std={desc.get('std', '?')}"
+                        if desc.get("top_values"):
+                            top = desc["top_values"][:3]
+                            line += f", top: {top}"
+                        parts.append(line)
+
+        return "\n".join(parts)
 
 
 class BaseSpecialist(ABC):

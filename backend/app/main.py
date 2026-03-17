@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.middleware import RequestLoggingMiddleware
-from app.api.routes import chat, data, sessions
+from app.api.routes import chat, data, metrics, sessions
 from app.config import settings
 from app.database import init_db, load_all_datasets
 
@@ -99,6 +99,7 @@ app.add_middleware(RequestLoggingMiddleware)
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(data.router, prefix="/api/v1")
 app.include_router(sessions.router, prefix="/api/v1")
+app.include_router(metrics.router, prefix="/api/v1")
 
 
 @app.get("/health")

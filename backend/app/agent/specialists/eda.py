@@ -312,11 +312,10 @@ class EDASpecialist(BaseSpecialist):
         }
 
         summary = (
-            f"[Phase 1: Dataset Overview] {df.shape[0]} rows x {df.shape[1]} columns. "
-            f"Quality: {quality_score}/100. "
+            f"Dataset has {df.shape[0]} rows and {df.shape[1]} columns. "
+            f"Quality score: {quality_score}/100. "
             f"Nulls: {null_cells} ({result_data['null_pct']}%). "
-            f"Duplicates: {duplicate_rows} ({dup_pct}%). "
-            f"Next: {next_phase}."
+            f"Duplicates: {duplicate_rows} ({dup_pct}%)."
         )
 
         return SpecialistResult(
@@ -435,7 +434,7 @@ class EDASpecialist(BaseSpecialist):
                 "workflow_phase": "Phase 2: Univariate Analysis",
             },
             summary=(
-                f"[Phase 2: Univariate] Described {len(columns)} columns: "
+                f"Described {len(columns)} columns: "
                 f"{', '.join(columns[:5])}"
                 + (f" (+{len(columns)-5} more)" if len(columns) > 5 else "")
                 + f".{flag_str}"
@@ -511,13 +510,13 @@ class EDASpecialist(BaseSpecialist):
             top = all_pairs[0]
             diag_str = " ".join(diagnostics[:3])
             summary = (
-                f"[Phase 3: Bivariate] Correlation ({method}) for {len(cols)} numeric columns. "
+                f"Correlation ({method}) across {len(cols)} numeric columns. "
                 f"{len(all_pairs)} notable pair(s). "
                 f"Strongest: {top['col1']} ↔ {top['col2']} (r={top['correlation']}, {top['strength']}). "
                 f"{diag_str}"
             )
         else:
-            summary = f"[Phase 3: Bivariate] Correlation ({method}) for {len(cols)} numeric columns. No notable correlations (all |r| < 0.2)."
+            summary = f"Correlation ({method}) across {len(cols)} numeric columns. No notable correlations (all |r| < 0.2)."
 
         # Store for downstream specialists (viz can use this)
         context.set_variable(f"corr_matrix_{dataset_id}", corr_matrix)
@@ -587,7 +586,7 @@ class EDASpecialist(BaseSpecialist):
                 "diagnostics": diagnostics,
             },
             summary=(
-                f"[Phase 2: Univariate] Value counts for '{column}': {unique_count} unique values. "
+                f"Value counts for '{column}': {unique_count} unique values. "
                 f"Top value: '{vc.index[0]}' ({int(vc.iloc[0])} occurrences, "
                 f"{round(vc.iloc[0] / total * 100, 1)}%). "
                 + (" ".join(diagnostics))
@@ -728,7 +727,7 @@ class EDASpecialist(BaseSpecialist):
             result_type=ResultType.TABLE,
             data=result_data,
             summary=(
-                f"[Phase 1: Dataset Overview] Quality: {quality_score}/100. "
+                f"Data quality: {quality_score}/100. "
                 f"{len(issues)} issues "
                 f"({severity_counts['high']} high, {severity_counts['medium']} medium, "
                 f"{severity_counts['low']} low). "
@@ -881,11 +880,10 @@ class EDASpecialist(BaseSpecialist):
             result_type=ResultType.TABLE,
             data=result_data,
             summary=(
-                f"[Data Preparation] Smart-structured dataset: {len(changes)} changes applied. "
+                f"Smart-structured dataset: {len(changes)} changes applied. "
                 f"Shape: {df.shape} → {clean_df.shape}. "
-                f"Quality: {score_before} → {score_after}/100 (Δ+{score_after - score_before}). "
-                f"Clean dataset saved as '{new_id}'. "
-                f"Next: {result_data['recommended_next']}"
+                f"Quality improved from {score_before} to {score_after}/100. "
+                f"Clean dataset saved as '{new_id}'."
             ),
         )
 

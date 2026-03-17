@@ -43,6 +43,7 @@ from app.agent.specialists.context import AnalysisContext
 from app.config import settings
 from app.guardrails.confirmation import ConfirmationManager
 from app.models.schemas import StreamEvent, StreamEventType
+from app.observability.metrics import metrics_collector
 
 logger = structlog.get_logger(__name__)
 
@@ -70,6 +71,7 @@ class Supervisor:
         self._middleware = ErrorRecoveryMiddleware(registry)
         self._confirmation_manager = ConfirmationManager()
         self._intent_classifier = IntentClassifier()
+        self._current_trace_id: str | None = None
         self._planner = Planner(self._client, registry)
         self._executor = Executor(
             self._client,
@@ -106,11 +108,17 @@ class Supervisor:
             )
         return loaded
 
-    async def run(self, user_message: str) -> AsyncGenerator[StreamEvent, None]:
+    async def run(
+        self, user_message: str, trace_id: str | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         """
         Main entry point — classify intent, route to the right execution mode.
         Yields StreamEvents that the WebSocket handler forwards to the frontend.
+
+        Every yielded StreamEvent carries the same ``trace_id`` so the client
+        can correlate all events belonging to one user message.
         """
+        self._current_trace_id = trace_id
         start_time = time.perf_counter()
 
         logger.info(
@@ -122,7 +130,7 @@ class Supervisor:
 
         if not self.context.has_data:
             async for event in self._handle_no_data(user_message):
-                yield event
+                yield self._tag(event)
             return
 
         # ─── Intent Classification ────────────────────────────────────
@@ -132,7 +140,7 @@ class Supervisor:
             has_data=self.context.has_data,
         )
 
-        yield StreamEvent(
+        yield self._tag(StreamEvent(
             event_type=StreamEventType.INTENT,
             data={
                 "intent": classified.intent.value,
@@ -140,24 +148,24 @@ class Supervisor:
                 "confidence": classified.confidence,
                 "reasoning": classified.reasoning,
             },
-        )
+        ))
 
         # ─── Route by execution mode ─────────────────────────────────
         if classified.mode == ExecutionMode.DIRECT:
             async for event in self._run_direct(user_message, classified):
-                yield event
+                yield self._tag(event)
 
         elif classified.mode == ExecutionMode.FOCUSED:
             async for event in self._run_focused(user_message):
-                yield event
+                yield self._tag(event)
 
         elif classified.mode == ExecutionMode.FULL:
             async for event in self._run_full(user_message):
-                yield event
+                yield self._tag(event)
 
         elif classified.mode == ExecutionMode.CONVERSATIONAL:
             async for event in self._run_conversational(user_message):
-                yield event
+                yield self._tag(event)
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         logger.info(
@@ -167,6 +175,12 @@ class Supervisor:
             intent=classified.intent.value,
             elapsed_ms=round(elapsed_ms, 2),
         )
+
+    def _tag(self, event: StreamEvent) -> StreamEvent:
+        """Stamp trace_id onto an outgoing StreamEvent."""
+        if self._current_trace_id and not event.trace_id:
+            event.trace_id = self._current_trace_id
+        return event
 
     # ─── DIRECT Mode ──────────────────────────────────────────────────
     # 0 LLM calls — known tool, known params, just execute and return
@@ -194,9 +208,13 @@ class Supervisor:
             specialist_name=tool_name,
         )
 
+        t0 = time.perf_counter()
         result, recovery_events = await self._middleware.execute_with_recovery(
             tool_name, params, self.context,
         )
+        spec_latency = (time.perf_counter() - t0) * 1000
+        metrics = metrics_collector.get_or_create(self.context.session_id)
+        metrics.record_specialist_call(tool_name, spec_latency, result.success)
 
         for rev in recovery_events:
             yield StreamEvent(
@@ -377,17 +395,23 @@ class Supervisor:
             reflection_summary=reflection_summary,
         )
 
+        t0 = time.perf_counter()
         response = await self._client.messages.create(
             model=settings.anthropic_model,
             max_tokens=4096,
             system=system_prompt,
             messages=[{"role": "user", "content": synth_message}],
         )
+        latency = (time.perf_counter() - t0) * 1000
+
+        metrics = metrics_collector.get_or_create(self.context.session_id)
+        metrics.record_llm_call(response.usage.input_tokens, response.usage.output_tokens, latency)
 
         logger.info(
             "supervisor_synthesize_full",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            latency_ms=round(latency, 2),
         )
         return response.content[0].text
 
@@ -402,24 +426,32 @@ class Supervisor:
             results_summary=results_summary,
         )
 
+        t0 = time.perf_counter()
         response = await self._client.messages.create(
             model=settings.anthropic_model,
             max_tokens=2048,
             system=(
                 "You are a data analyst giving concise answers. "
-                "Lead with the answer — the key number or finding. No preamble, no filler. "
-                "For SQL: show the query in a code block, then the result. "
-                "Bold important numbers. Keep it to 3-8 sentences max. "
-                "Never show internal tool names, phase labels, or template placeholders. "
-                "You have real data — always use the actual table names and column names."
+                "FIRST sentence = the answer (a number or finding). No preamble. "
+                "You have REAL data in the results — cite actual numbers, means, p-values, row counts. "
+                "Bold key values with **markdown**. "
+                "For SQL: show the query in a ```sql block, then results as a markdown table. "
+                "NEVER say 'Phase 1', tool names, 'Based on my analysis', or 'Let me'. "
+                "NEVER add 'Next Steps' or 'Recommendations' unless asked. "
+                "3-6 sentences max. Every sentence must contain a specific number."
             ),
             messages=[{"role": "user", "content": synth_message}],
         )
+        latency = (time.perf_counter() - t0) * 1000
+
+        metrics = metrics_collector.get_or_create(self.context.session_id)
+        metrics.record_llm_call(response.usage.input_tokens, response.usage.output_tokens, latency)
 
         logger.info(
             "supervisor_synthesize_lightweight",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            latency_ms=round(latency, 2),
         )
         return response.content[0].text
 

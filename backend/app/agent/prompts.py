@@ -202,43 +202,41 @@ Be constructively critical. Don't require perfection — a score of 7+ with no c
 
 FOCUSED_SYNTHESIS_PROMPT = """The user asked: {user_message}
 
-Here are the raw analysis results:
+Here are the analysis results (with actual data):
 {results_summary}
 
-Give a SHORT, direct answer. Rules:
+Rules — FOLLOW STRICTLY:
 
-1. **Lead with the answer** — the key number, finding, or result first. No preamble.
-2. **For SQL queries** — show the SQL that was executed in a code block, then the result (table or number). That's it.
-3. **For statistics** — state the finding, the key numbers (bolded), and what it means in one sentence.
-4. **For EDA** — summarize the 2-3 most important findings with specific numbers.
-5. **Bold important numbers** — use markdown bold for key values.
-6. Never show internal labels, tool names, or phase numbers.
-7. Never give instructions like "replace your_table_name" — you have the real data, use it.
-8. Keep it to 3-8 sentences max. No "Alternative Approaches" or "Next Steps" sections unless the user asked."""
+1. **Lead with the answer** — the key number or finding FIRST. Never start with "I analyzed" or "Based on the analysis."
+2. **Use the real numbers above** — you have actual means, p-values, row counts, correlation values. CITE THEM with markdown bold.
+3. **For SQL** — show the executed query in a ```sql block, then the result rows as a markdown table. Nothing else.
+4. **For statistics** — state the finding and bold the p-value, effect size, and test name. One sentence for what it means.
+5. **For EDA/profiling** — pick the 2-3 most interesting findings and cite specific numbers. Skip obvious things like "the dataset has N rows."
+6. **For visualizations** — describe what the chart reveals, not that a chart was generated.
+7. NEVER say "Phase 1", "Phase 2", tool names like "eda_profile", or any internal label.
+8. NEVER add "Next Steps", "Recommendations", "Further Analysis", or "Limitations" sections unless explicitly asked.
+9. NEVER use filler phrases: "Let me", "I'd be happy to", "Here's what I found", "Based on my analysis".
+10. 3-6 sentences max. Every sentence must contain a specific number or finding."""
 
-SYNTHESIZER_PROMPT = """You are synthesizing the analysis results into a clear, insightful response for the user.
+SYNTHESIZER_PROMPT = """You are presenting analysis results to the user.
 
-Original question: {user_message}
+Question: {user_message}
 
-Analysis results:
+Analysis results (with actual data):
 {results_summary}
 
 Reflection notes:
 {reflection_summary}
 
-Follow the **Insight Communication Standard** — every output must be accurate, precise, clear, error-free, relevant, and actionable.
+Rules — FOLLOW STRICTLY:
 
-Write a response that:
-1. **Leads with the answer** — start with the key finding or insight. Not the methodology.
-2. **Uses precise numbers with context** — "$85K mean salary, ranging $68K-$110K" not "salary is moderate."
-3. **Supports with evidence** — reference specific numbers, charts, and statistical results.
-4. **Acknowledges limitations** — mention any caveats, data quality issues, or assumptions.
-5. **Suggests concrete next steps** — what specific analysis or action should the user consider next?
-
-Formatting guidelines:
-- Write in clear, professional language. Match the user's level of sophistication.
-- Use bullet points for multiple findings.
-- Reference the charts and tables that were generated (they'll be displayed alongside your text).
-- Do NOT use technical jargon unless the user's question was technical.
-- If the analysis identified the question type (Descriptive/Diagnostic/Predictive), frame your answer accordingly.
+1. **Lead with the key finding.** First sentence = the answer. Not methodology, not preamble.
+2. **Cite real numbers with context.** You have the actual data above — use it. "$85K mean salary (std $15K, range $68K–$110K)" not "salary is moderate."
+3. **Bold key values** using markdown.
+4. Use bullet points for 3+ findings.
+5. Reference generated charts by describing what they show, not that they exist.
+6. Mention data quality caveats ONLY if quality score < 80 or there are high-severity issues.
+7. Do NOT add "Next Steps" or "Recommendations" unless the user asked for them.
+8. Do NOT use internal labels (Phase 1, eda_profile, etc.) or filler phrases ("I analyzed", "Let me", "Based on my analysis").
+9. Keep it concise — 4-10 sentences for complex analyses, 2-5 for simple ones.
 """

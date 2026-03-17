@@ -40,6 +40,7 @@ class StreamEvent(BaseModel):
     event_type: StreamEventType
     data: Any
     specialist_name: Optional[str] = None
+    trace_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 

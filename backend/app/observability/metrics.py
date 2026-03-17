@@ -92,6 +92,9 @@ class MetricsCollector:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionMetrics] = {}
 
+    def clear_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
     def get_or_create(self, session_id: str) -> SessionMetrics:
         if session_id not in self._sessions:
             self._sessions[session_id] = SessionMetrics(session_id=session_id)

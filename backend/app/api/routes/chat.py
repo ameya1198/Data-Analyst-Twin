@@ -16,6 +16,12 @@ from app.database import (
     touch_session,
 )
 from app.models.schemas import ChatRequest, StreamEvent, StreamEventType
+from app.observability.logger import (
+    bind_session_context,
+    clear_session_context,
+    generate_trace_id,
+)
+from app.observability.metrics import metrics_collector
 
 logger = structlog.get_logger(__name__)
 
@@ -54,10 +60,9 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
     """
     WebSocket endpoint that streams agent events to the frontend.
 
-    When a CONFIRMATION_REQUEST event is emitted by the supervisor (for
-    destructive operations), the handler pauses the event stream, reads the
-    next WebSocket message (the user's approval/rejection), resolves the
-    ConfirmationManager future, and then resumes iterating.
+    Every user message gets a unique trace_id that propagates through all
+    log lines (via structlog contextvars) and all StreamEvents sent back
+    to the client. This enables end-to-end request tracing.
     """
     await websocket.accept()
     logger.info("ws_connected", session_id=session_id)
@@ -85,12 +90,18 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
 
             user_message = payload.get("message", "")
 
+            # ── Generate trace_id and bind context for this message ──
+            trace_id = generate_trace_id()
+            bind_session_context(session_id, trace_id)
+
             if not user_message.strip():
                 error_event = StreamEvent(
                     event_type=StreamEventType.ERROR,
                     data={"error": "Empty message", "summary": "Please type a message."},
+                    trace_id=trace_id,
                 )
                 await websocket.send_text(error_event.model_dump_json())
+                clear_session_context()
                 continue
 
             try:
@@ -107,7 +118,7 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
             assistant_content = ""
 
             try:
-                async for event in supervisor.run(user_message):
+                async for event in supervisor.run(user_message, trace_id=trace_id):
                     await websocket.send_text(event.model_dump_json())
 
                     if event.event_type == StreamEventType.FINAL_RESPONSE:
@@ -156,8 +167,11 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
                         "error": str(exc),
                         "summary": "An unexpected error occurred during analysis.",
                     },
+                    trace_id=trace_id,
                 )
                 await websocket.send_text(error_event.model_dump_json())
+            finally:
+                clear_session_context()
 
     except WebSocketDisconnect:
         logger.info("ws_disconnected", session_id=session_id)
