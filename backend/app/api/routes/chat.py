@@ -1,6 +1,8 @@
 import json
+import time
 import traceback
 import uuid
+from collections import defaultdict
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -28,6 +30,25 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 _supervisors: dict[str, Supervisor] = {}
+
+# ── WebSocket rate limiting ───────────────────────────────────────────────────
+# Maximum messages per session within the rolling window.
+_WS_RATE_LIMIT = 30        # max messages
+_WS_RATE_WINDOW = 60       # seconds
+_ws_message_times: dict[str, list[float]] = defaultdict(list)
+
+
+def _is_rate_limited(session_id: str) -> bool:
+    """Return True if this session has exceeded the message rate limit."""
+    now = time.monotonic()
+    cutoff = now - _WS_RATE_WINDOW
+    times = _ws_message_times[session_id]
+    # Drop timestamps outside the rolling window
+    times[:] = [t for t in times if t > cutoff]
+    if len(times) >= _WS_RATE_LIMIT:
+        return True
+    times.append(now)
+    return False
 
 
 async def _get_or_create_supervisor(session_id: str) -> Supervisor:
@@ -90,6 +111,18 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
 
             user_message = payload.get("message", "")
             dataset_ids = payload.get("dataset_ids") or []
+
+            # ── Rate limiting ─────────────────────────────────────────
+            if _is_rate_limited(session_id):
+                rate_event = StreamEvent(
+                    event_type=StreamEventType.ERROR,
+                    data={
+                        "error": "rate_limit_exceeded",
+                        "summary": "Too many messages. Please wait a moment before sending another.",
+                    },
+                )
+                await websocket.send_text(rate_event.model_dump_json())
+                continue
 
             # ── Generate trace_id and bind context for this message ──
             trace_id = generate_trace_id()
@@ -180,3 +213,4 @@ async def chat_websocket(websocket: WebSocket, session_id: str):
         logger.error("ws_fatal", session_id=session_id, error=str(exc))
     finally:
         _supervisors.pop(session_id, None)
+        _ws_message_times.pop(session_id, None)

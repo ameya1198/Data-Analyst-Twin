@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     max_llm_calls_per_session: int = 50
     max_specialist_calls_per_turn: int = 15
     specialist_timeout_seconds: int = 60
+    confirmation_timeout_seconds: int = 120
 
     # CORS
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"

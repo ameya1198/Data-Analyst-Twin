@@ -315,6 +315,28 @@ class VizSpecialist(BaseSpecialist):
         self, df: pd.DataFrame, dataset_id: str, params: dict, context: AnalysisContext
     ) -> SpecialistResult:
         x, y = params["x"], params["y"]
+
+        # Auto-detect columns when the plan injected "__auto__" placeholders
+        if x == "__auto__" or y == "__auto__":
+            x_auto, y_auto = None, None
+            for col in df.columns:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    if y_auto is None:
+                        y_auto = col
+                else:
+                    if x_auto is None:
+                        x_auto = col
+            if x_auto and y_auto:
+                x, y = x_auto, y_auto
+                params["x"], params["y"] = x, y
+            else:
+                return SpecialistResult(
+                    success=False, specialist_name=self.name,
+                    result_type=ResultType.ERROR, data=None,
+                    summary="Could not auto-detect chart columns. Need at least one categorical and one numeric column.",
+                    error="Auto-detect failed",
+                )
+
         missing = [c for c in [x, y] if c not in df.columns]
         if missing:
             return self._col_not_found(missing)

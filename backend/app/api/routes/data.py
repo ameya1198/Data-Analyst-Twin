@@ -1,4 +1,6 @@
 import io
+import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query
@@ -149,3 +151,41 @@ async def download_dataset(
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{base_name}.json"'},
         )
+
+
+@router.delete("/uploads/cleanup")
+async def cleanup_old_uploads(max_age_hours: int = 24) -> dict[str, Any]:
+    """Delete uploaded files older than max_age_hours from the uploads directory.
+
+    This does not affect in-memory datasets — only the on-disk files that are
+    no longer needed. Defaults to 24 hours.
+    """
+    return _cleanup_upload_dir(max_age_hours=max_age_hours)
+
+
+def _cleanup_upload_dir(max_age_hours: int = 24) -> dict[str, Any]:
+    """Remove files older than max_age_hours from the uploads directory.
+
+    Safe to call at startup or on demand. Returns a summary of what was removed.
+    """
+    upload_path = settings.upload_path
+    cutoff = time.time() - max_age_hours * 3600
+    removed: list[str] = []
+    errors: list[str] = []
+
+    for p in upload_path.iterdir():
+        if not p.is_file():
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                removed.append(p.name)
+        except OSError as exc:
+            errors.append(f"{p.name}: {exc}")
+
+    return {
+        "removed_count": len(removed),
+        "removed_files": removed,
+        "errors": errors,
+        "max_age_hours": max_age_hours,
+    }

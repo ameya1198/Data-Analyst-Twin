@@ -156,7 +156,7 @@ class AnalysisContext:
             return "No analysis results yet."
         lines = []
         for r in recent:
-            data_preview = str(r.data)[:200] if r.data is not None else "None"
+            data_preview = str(r.data)[:500] if r.data is not None else "None"
             lines.append(f"[{r.specialist_name}] {r.step_description}: {data_preview}")
         return "\n".join(lines)
 

@@ -264,7 +264,7 @@ class EDASpecialist(BaseSpecialist):
             }
 
             if col_type == "numeric":
-                clean = pd.to_numeric(series, errors="coerce").dropna()
+                clean = self._coerce_to_numeric(series)
                 if len(clean) > 0:
                     profile["mean"] = round(float(clean.mean()), 2)
                     profile["median"] = round(float(clean.median()), 2)
@@ -345,13 +345,14 @@ class EDASpecialist(BaseSpecialist):
             col_type = self._classify_column(series)
             desc: dict[str, Any] = {
                 "type": col_type,
-                "count": int(series.notna().sum()),
+                "total_rows": len(series),
+                "non_null_count": int(series.notna().sum()),
                 "null_count": int(series.isna().sum()),
                 "unique": int(series.nunique()),
             }
 
             if col_type == "numeric":
-                clean = pd.to_numeric(series, errors="coerce").dropna()
+                clean = self._coerce_to_numeric(series)
                 if len(clean) > 0:
                     skew_val = round(float(clean.skew()), 4)
                     kurt_val = round(float(clean.kurtosis()), 4)
@@ -894,6 +895,19 @@ class EDASpecialist(BaseSpecialist):
         """Check if a series holds string data (works with both object and StringDtype in pandas 3.0+)."""
         return pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series)
 
+    @staticmethod
+    def _coerce_to_numeric(series: pd.Series) -> pd.Series:
+        """Coerce a series to numeric, handling formatted numbers like '$1,234.56' or '42%'.
+
+        When a column is classified as numeric but stored as strings, a bare
+        pd.to_numeric() call fails on formatting characters. This helper strips
+        common symbols first so the actual values are preserved correctly.
+        """
+        if pd.api.types.is_numeric_dtype(series):
+            return series.dropna()
+        stripped = series.astype(str).str.replace(r"[$€£¥₹,\s%]", "", regex=True).str.strip()
+        return pd.to_numeric(stripped, errors="coerce").dropna()
+
     def _classify_column(self, series: pd.Series) -> str:
         """Classify a column as numeric, categorical, text, datetime, or boolean."""
         if pd.api.types.is_bool_dtype(series):
@@ -906,6 +920,16 @@ class EDASpecialist(BaseSpecialist):
             non_null = series.dropna()
             if len(non_null) == 0:
                 return "empty"
+
+            # Detect numeric values stored as strings.
+            # Strip common formatting (currency symbols, commas, percent signs, whitespace)
+            # before attempting numeric coercion so values like "$1,234.56" or "42 %" parse.
+            stripped = non_null.astype(str).str.replace(r"[$€£¥₹,\s%]", "", regex=True).str.strip()
+            numeric_attempt = pd.to_numeric(stripped, errors="coerce")
+            numeric_ratio = numeric_attempt.notna().sum() / len(non_null)
+            if numeric_ratio >= 0.8:
+                return "numeric"
+
             avg_len = non_null.astype(str).str.len().mean()
             unique_ratio = non_null.nunique() / len(non_null) if len(non_null) > 0 else 0
             if avg_len > 50:

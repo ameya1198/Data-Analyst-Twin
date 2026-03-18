@@ -87,6 +87,16 @@ When data quality is poor or the user requests cleaning:
 - Every number needs context: "$85K mean salary" is vague; "$85K mean salary, ranging $68K-$110K with a right skew toward senior roles" is precise.
 - If the data doesn't support a conclusion, say so. A good analyst knows when to say "the data is inconclusive."
 
+## How You Work
+
+You have specialist tools available. You MUST use them to answer data questions — never guess or
+make up data. When the user asks for a chart, visualization, or plot, call the appropriate viz_*
+tool. When the user asks to query data, use the sql_* tools. NEVER tell the user to provide data
+or share analysis results — the data is already loaded in your context below.
+
+If the user references prior results (e.g. "chart of that", "visualize those results"), use the
+data from the "Analysis So Far" section or re-run the query and chart it.
+
 ## Available Data
 
 {dataset_summaries}
@@ -202,24 +212,220 @@ Return a JSON object:
 Be constructively critical. Don't require perfection — a score of 7+ with no critical gaps is satisfactory.
 """
 
+
+# ─── Golden Output Templates ─────────────────────────────────────────────────
+# Each template defines the EXACT structure the LLM must follow for a given
+# result category.  The synthesis prompt injects the matching template so the
+# output is consistent across runs.  Designed using the Template Systems and
+# Few-Shot Learning patterns from the prompt-engineering skill.
+
+_TEMPLATE_PROFILE = """## Output format — follow EXACTLY:
+
+**Dataset**: {{rows}} rows × {{columns}} columns | **Quality**: {{score}}/100
+
+**Column types**: {{n_numeric}} numeric, {{n_categorical}} categorical, {{n_datetime}} datetime, {{n_text}} text
+
+**Key findings**:
+- Highest null rate: {{column}} at {{pct}}%
+- Duplicate rows: {{dup_count}} ({{dup_pct}}%)
+- {{one notable stat, e.g. "Price has the widest range: $X–$Y"}}
+
+Fill in {{placeholders}} with the actual numbers from the results. Do NOT add sections beyond these three. No "Next Steps"."""
+
+_TEMPLATE_DESCRIBE = """## Output format — follow EXACTLY:
+
+**Dataset**: {{total_rows}} rows
+
+| Column | Type | Mean | Median | Std | Min | Max | Nulls |
+|--------|------|------|--------|-----|-----|-----|-------|
+| {{col1}} | {{type}} | {{mean}} | {{median}} | {{std}} | {{min}} | {{max}} | {{null_count}} |
+| ... repeat for each column ... |
+
+**Flags**:
+- {{list columns with skewness > 1 or kurtosis > 3 or outliers, one bullet each}}
+
+Use the real numbers from the results. Include ALL columns the specialist described. Do NOT omit any. No prose paragraphs — just the table and flags."""
+
+_TEMPLATE_SQL = """## Output format — follow EXACTLY:
+
+{{One sentence answering the user's question with the key number bolded.}}
+
+```sql
+{{the SQL query, exactly as executed}}
+```
+
+| {{col1}} | {{col2}} | ... |
+|----------|----------|-----|
+| {{row1}} | ... | ... |
+| ... up to 20 rows ... |
+
+{{One sentence of insight about the result pattern, citing a specific number.}}
+
+Use ONLY the numbers from the Result rows. Do NOT substitute or infer from the schema. If the user asked for ONLY the query, output ONLY the ```sql block — nothing else."""
+
+_TEMPLATE_VIZ = """## Output format — follow EXACTLY:
+
+{{One sentence describing the dominant pattern the chart reveals, with the key value bolded.}}
+
+{{One sentence noting a secondary pattern or outlier, citing a specific number.}}
+
+Do NOT say "a chart was generated" or "here is the visualization." Describe what the chart SHOWS, not that it exists. Two sentences max."""
+
+_TEMPLATE_STATS_TEST = """## Output format — follow EXACTLY:
+
+**Result**: {{one-sentence finding with direction and magnitude}}
+
+| Metric | Value |
+|--------|-------|
+| Test | {{test_name}} |
+| Statistic | {{test_statistic}} |
+| p-value | {{p_value}} |
+| Effect size | {{effect_size}} ({{effect_label}}) |
+| 95% CI | [{{ci_lower}}, {{ci_upper}}] |
+
+**Interpretation**: {{one sentence in plain English, e.g. "We are 95% confident the difference is real and the effect is moderate."}}
+
+Use the exact numbers from the results. Do NOT add methodology or assumptions sections."""
+
+_TEMPLATE_CORRELATION = """## Output format — follow EXACTLY:
+
+**Strongest correlations** (|r| ≥ 0.3):
+
+| Variable A | Variable B | r | Strength |
+|------------|------------|---|----------|
+| {{col_a}} | {{col_b}} | {{r_value}} | {{strength_label}} |
+| ... |
+
+**Multicollinearity flags**: {{list pairs with |r| > 0.8, or "None detected"}}
+
+Use the strength guide: negligible (<0.2), weak (0.2–0.4), moderate (0.4–0.6), strong (0.6–0.8), very strong (>0.8). No additional prose."""
+
+_TEMPLATE_AB_TEST = """## Output format — follow EXACTLY:
+
+**Verdict**: {{Significant/Not significant}} — {{treatment}} {{outperforms/underperforms}} {{control}} by **{{relative_uplift}}%**
+
+| Metric | Control | Treatment |
+|--------|---------|-----------|
+| N | {{n_control}} | {{n_treatment}} |
+| Mean | {{mean_control}} | {{mean_treatment}} |
+| Std | {{std_control}} | {{std_treatment}} |
+
+| Metric | Value |
+|--------|-------|
+| Absolute difference | {{difference}} |
+| p-value | {{p_value}} |
+| Cohen's d | {{cohens_d}} ({{effect_label}}) |
+| 95% CI | [{{ci_lower}}, {{ci_upper}}] |
+| SRM check | {{OK / WARNING}} |
+
+**Plain English**: {{one sentence, e.g. "The treatment increased conversion by 12%, and we're 95% confident the true lift is between 8% and 16%."}}"""
+
+_TEMPLATE_CLEANING = """## Output format — follow EXACTLY:
+
+**Before**: {{rows_before}} rows × {{cols_before}} columns
+**After**: {{rows_after}} rows × {{cols_after}} columns
+
+**Changes applied** ({{change_count}} total):
+- {{action 1}}: {{detail}}
+- {{action 2}}: {{detail}}
+- ...
+
+**Quality delta**: {{before_score}} → {{after_score}} (+{{delta}})
+
+Use the real numbers from the results. List ALL changes, not just a summary."""
+
+_TEMPLATE_GENERIC = """Output rules — follow STRICTLY:
+1. First sentence = the answer (a number or finding). No preamble.
+2. Cite actual numbers from the results with **bold** markdown.
+3. 3-6 sentences max. Every sentence must contain a specific number.
+4. No "Next Steps", "Recommendations", or filler phrases.
+5. No internal labels (Phase 1, eda_profile, etc.)."""
+
+
+def select_output_template(results: list) -> str:
+    """Pick the golden output template based on which specialists produced results.
+
+    ``results`` is a list of SpecialistResult objects (or anything with
+    ``specialist_name``, ``result_type``, and ``data`` attributes).
+    """
+    if not results:
+        return _TEMPLATE_GENERIC
+
+    # Collect specialist names and result types from the run
+    specialist_names: set[str] = set()
+    result_types: set[str] = set()
+    tool_names: set[str] = set()
+
+    for r in results:
+        sname = getattr(r, "specialist_name", "")
+        rtype = getattr(r, "result_type", "")
+        specialist_names.add(sname)
+        result_types.add(rtype.value if hasattr(rtype, "value") else str(rtype))
+
+        data = getattr(r, "data", None)
+        if isinstance(data, dict):
+            # Detect specific tool by data shape
+            if "descriptions" in data:
+                tool_names.add("eda_describe")
+            if "column_profiles" in data and "quality_score" in data:
+                tool_names.add("eda_profile")
+            if "correlation_matrix" in data:
+                tool_names.add("eda_correlations")
+            if "chart_config" in data:
+                tool_names.add("viz")
+            if "query" in data and "preview" in data:
+                tool_names.add("sql_execute")
+            if "control" in data and "treatment" in data:
+                tool_names.add("stats_ab_test")
+            if "test_name" in data and "p_value" in data:
+                tool_names.add("stats_test")
+            if "changes" in data and "pipeline_stage" in data:
+                tool_names.add("cleaning")
+
+    # Priority order: most specific first
+    if "stats_ab_test" in tool_names:
+        return _TEMPLATE_AB_TEST
+    if "stats_test" in tool_names:
+        return _TEMPLATE_STATS_TEST
+    if "eda_correlations" in tool_names:
+        return _TEMPLATE_CORRELATION
+    if "eda_describe" in tool_names:
+        return _TEMPLATE_DESCRIBE
+    if "eda_profile" in tool_names:
+        return _TEMPLATE_PROFILE
+    if "cleaning" in tool_names:
+        return _TEMPLATE_CLEANING
+    # If viz is present alongside SQL, the chart speaks for itself
+    if "viz" in tool_names:
+        return _TEMPLATE_VIZ
+    if "sql_execute" in tool_names:
+        return _TEMPLATE_SQL
+
+    # Fallback based on result_type enum
+    if "chart" in result_types:
+        return _TEMPLATE_VIZ
+    if "statistic" in result_types:
+        return _TEMPLATE_STATS_TEST
+
+    return _TEMPLATE_GENERIC
+
+
+# ─── Synthesis Prompts (now template-aware) ──────────────────────────────────
+
 FOCUSED_SYNTHESIS_PROMPT = """The user asked: {user_message}
 
 Here are the analysis results (with actual data):
 {results_summary}
 
-Rules — FOLLOW STRICTLY:
+{output_template}
 
-1. **Lead with the answer** — the key number or finding FIRST. Never start with "I analyzed" or "Based on the analysis."
-2. **Use the real numbers above** — you have actual means, p-values, row counts, correlation values. CITE THEM with markdown bold.
-3. **For SQL aggregates (AVG, SUM, COUNT, etc.)** — Use ONLY the numbers from the Result rows. Do NOT substitute dataset row counts or infer from schema. The result row shows the computed value; that is the correct answer.
-4. **For SQL** — When the user asks for ONLY the query (e.g. "just the query", "give me the SQL", "SQL only", "that's all"), respond with ONLY the query in a ```sql block. No summary, no results, no interpretation. Otherwise, show the query in a ```sql block, then the result rows as a markdown table.
-5. **For statistics** — state the finding and bold the p-value, effect size, and test name. One sentence for what it means.
-6. **For EDA/profiling** — pick the 2-3 most interesting findings and cite specific numbers. Skip obvious things like "the dataset has N rows."
-7. **For visualizations** — describe what the chart reveals, not that a chart was generated.
-8. NEVER say "Phase 1", "Phase 2", tool names like "eda_profile", or any internal label.
-9. NEVER add "Next Steps", "Recommendations", "Further Analysis", or "Limitations" sections unless explicitly asked.
-10. NEVER use filler phrases: "Let me", "I'd be happy to", "Here's what I found", "Based on my analysis".
-11. 3-6 sentences max. Every sentence must contain a specific number or finding."""
+Global rules — ALWAYS apply on top of the template above:
+- Use ONLY the actual numbers from the results. NEVER fabricate or round aggressively.
+- For SQL aggregates (AVG, SUM, COUNT): use ONLY the numbers from the Result rows. Do NOT substitute dataset row counts.
+- NEVER say "Phase 1", "Phase 2", tool names like "eda_profile", or any internal label.
+- NEVER add "Next Steps", "Recommendations", "Further Analysis", or "Limitations" unless explicitly asked.
+- NEVER use filler phrases: "Let me", "I'd be happy to", "Here's what I found", "Based on my analysis".
+- Bold key values with **markdown**."""
 
 SYNTHESIZER_PROMPT = """You are presenting analysis results to the user.
 
@@ -231,16 +437,15 @@ Analysis results (with actual data):
 Reflection notes:
 {reflection_summary}
 
-Rules — FOLLOW STRICTLY:
+{output_template}
 
-1. **Lead with the key finding.** First sentence = the answer. Not methodology, not preamble.
-2. **Cite real numbers with context.** You have the actual data above — use it. "$85K mean salary (std $15K, range $68K–$110K)" not "salary is moderate."
-3. **For SQL aggregate results (AVG, SUM, COUNT):** Use ONLY the values from the Result rows. Do NOT infer or substitute numbers from dataset schemas. The result row holds the correct computed value.
-4. **Bold key values** using markdown.
-5. Use bullet points for 3+ findings.
-6. Reference generated charts by describing what they show, not that they exist.
-7. Mention data quality caveats ONLY if quality score < 80 or there are high-severity issues.
-8. Do NOT add "Next Steps" or "Recommendations" unless the user asked for them.
-9. Do NOT use internal labels (Phase 1, eda_profile, etc.) or filler phrases ("I analyzed", "Let me", "Based on my analysis").
-10. Keep it concise — 4-10 sentences for complex analyses, 2-5 for simple ones.
+Global rules — ALWAYS apply on top of the template above:
+- Use ONLY the actual numbers from the results. NEVER fabricate or round aggressively.
+- For SQL aggregates (AVG, SUM, COUNT): use ONLY the numbers from the Result rows. Do NOT substitute dataset row counts.
+- Bold key values with **markdown**.
+- Reference generated charts by describing what they show, not that they exist.
+- Mention data quality caveats ONLY if quality score < 80 or there are high-severity issues.
+- Do NOT add "Next Steps" or "Recommendations" unless the user asked for them.
+- NEVER use internal labels (Phase 1, eda_profile, etc.) or filler phrases ("I analyzed", "Let me", "Based on my analysis").
+- Keep it concise — 4-10 sentences for complex analyses, 2-5 for simple ones.
 """

@@ -1,4 +1,4 @@
-# Data Analyst Digital Twin — Project History
+# Anvaya — Project History
 
 > This file is the single source of truth for the project's history, architecture decisions,
 > current state, and pending work. Refer to this whenever you need context on what has been
@@ -8,13 +8,16 @@
 
 ## 1. Project Vision
 
-An AI-powered agent that mimics the reasoning, workflow, and outputs of a real data analyst.
-The user uploads data (CSV/Excel/JSON/Parquet), asks questions in natural language, and the
-twin plans, executes, and synthesizes analysis just like a human analyst would.
+**Anvaya** — Your data has a story. Anvaya reads it.
+
+Drop in a spreadsheet. Ask anything. Get back charts, SQL, statistics, and the insight that
+actually matters. The user uploads data (CSV/Excel/JSON/Parquet), asks questions in plain
+English, and Anvaya plans, executes, and synthesizes analysis — charts, SQL, statistics,
+and actionable insights through natural conversation.
 
 **Tech stack decided by user:**
 - **Backend**: Python / FastAPI
-- **Frontend**: Next.js / React (deferred — backend-first approach confirmed)
+- **Frontend**: Next.js / React (built — Tailwind, WebSocket, chat, upload, charts)
 - **LLM**: Anthropic Claude (`claude-sonnet-4-20250514`)
 - **Data processing**: pandas, numpy, scipy, statsmodels
 - **Visualization**: Plotly
@@ -404,6 +407,7 @@ and cross-specialist use (the Analytics Maturity Ladder is still referenced in t
 | 14 | Statistical Analysis Specialist with scipy/statsmodels | Full hypothesis testing framework: 5-step process, auto test selection, effect size + CI always paired with p-value. A/B test evaluation with SRM check. Regression with VIF diagnostics. Power analysis for experiment planning. |
 | 15 | Data Cleaning & Transformation Specialist | 8-step auditable pipeline. Three laws (never modify source, document everything, validate before/after). MCAR/MAR/MNAR-aware missing handling. Handles Pandas 3.x str dtype. Category mapping, auto date/numeric detection, full validation suite. |
 | 16 | Intent-based routing (4 execution modes) | DIRECT (0 LLM calls) for known single-tool requests, FOCUSED (2 calls) for scoped tasks, FULL (3-5 calls) for open exploration, CONVERSATIONAL (1+ calls) for follow-ups. Rule-based classification — zero latency, zero cost. Saves 2-4 LLM calls per request on common use cases. |
+| 17 | Rebrand to Anvaya | New identity (wordmark, fonts, copy) per brand guidelines. Cormorant Garamond + DM Sans typography, Wavy Background hero, updated product positioning ("Your data has a story. Anvaya reads it."). |
 
 ---
 
@@ -467,6 +471,20 @@ backend/
 └── .venv/                              # Python virtual environment
 ```
 
+```
+frontend/
+├── app/
+│   ├── layout.tsx                      # Font setup (Cormorant + DM Sans), metadata
+│   ├── page.tsx                        # Landing (HeroWavy, FeaturesBento, Footer)
+│   └── chat/page.tsx                   # Chat app with BrandNavbar
+├── components/
+│   ├── brand/                          # BrandLogo, BrandFavicon, BrandNavbar
+│   ├── chat/                           # ChatInterface, MessageBubble, MessageInput
+│   ├── data/                           # UploadPanel, DatasetUploadDropzone, DatasetPreviewPane
+│   ├── ui/                             # HeroWavy, WavyBackground, FeaturesBento, Footer
+│   └── charts/                         # ChartRenderer
+```
+
 ---
 
 ## 7. Pending Work (Phase 1 Remaining)
@@ -476,12 +494,18 @@ backend/
 - [x] **Unit tests (pytest)** — 635 tests across 14 test files, all passing
 - [x] **Intent classifier & smart routing** — 4 execution modes (DIRECT/FOCUSED/FULL/CONVERSATIONAL) to minimize LLM cost
 
-### Frontend tasks (deferred — backend-first):
-- [ ] **Next.js setup** — Tailwind, app layout, API client, WebSocket hook
-- [ ] **Chat UI** — message bubbles with reasoning steps, specialist indicators, streaming, code blocks
-- [ ] **Data upload UI** — drag-and-drop, dataset list, table preview, schema viewer
-- [ ] **Chart renderer** — Plotly.js interactive charts in chat
-- [ ] **WebSocket streaming** — typed events between frontend and backend
+### Frontend tasks (completed):
+- [x] **Next.js setup** — Tailwind, app layout, API client, WebSocket hook
+- [x] **Chat UI** — message bubbles with reasoning steps, specialist indicators, streaming, code blocks
+- [x] **Data upload UI** — drag-and-drop, dataset list, table preview, schema viewer
+- [x] **Chart renderer** — Plotly.js interactive charts in chat
+- [x] **WebSocket streaming** — typed events between frontend and backend
+
+### Recently completed (Anvaya UI):
+- Cormorant Garamond + DM Sans font system (ANVAYA_FONTS.md)
+- Wavy Background hero (Aceternity) replacing flowing lines — muted pastel waves on #fafaf8
+- Hero copy: "Your data has a story. Anvaya reads it."
+- Metadata, SEO, and chat empty-state copy updates
 
 ### Future phases (not started):
 - Phase 2: Code execution sandbox, database connectors
@@ -491,6 +515,8 @@ backend/
 ---
 
 ## 8. Configuration
+
+**Metadata** (landing `layout.tsx`): Title "Anvaya — Your data has a story."; meta/og/twitter description "Drop in a spreadsheet. Ask anything. Get back charts, SQL, statistics, and the insight that actually matters."
 
 **Settings** (`config.py`):
 - Model: `claude-sonnet-4-20250514`
@@ -555,3 +581,7 @@ All tests run inline via Python scripts (no pytest suite yet — that's pending)
 | StreamEventType | Added INTENT event type | Frontend can display which mode was selected and why. |
 | Prompts | Added FOCUSED_SYNTHESIS_PROMPT | Lightweight 3-8 sentence summary for FOCUSED mode (vs full narrative for FULL mode). |
 | Memory | Added has_history property | Intent classifier uses conversation history to boost follow-up signal confidence. |
+| Rebrand | Data Analyst Twin → Anvaya | Brand components (BrandLogo, BrandFavicon, BrandNavbar), favicon अ, tagline "Ancient logic. Modern intelligence." per ANVAYA_REBRAND.md. |
+| Font system | Cormorant Garamond (wordmark, hero, headings) + DM Sans (body, labels, chat) — weights 300/400/500 | ANVAYA_FONTS.md brand typography. Serif for brand identity, sans for UI and analysis content. |
+| Hero background | Replaced BackgroundPaths (flowing SVG) with WavyBackground (Aceternity canvas) — muted pastel waves on #fafaf8 | 21st.dev / Aceternity Wavy Background spec. Option B: muted pastel on light background. |
+| Product copy | Hero "Your data has a story. Anvaya reads it.", subtitle, meta/og/twitter, chat empty state updated | New positioning per brand guidelines. Removed "AI agent mimics..." phrasing. |

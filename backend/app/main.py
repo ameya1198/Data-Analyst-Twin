@@ -76,6 +76,15 @@ async def lifespan(app: FastAPI):
     if reloaded:
         logger.info("datasets_reloaded", count=reloaded, total=len(saved_datasets))
 
+    # Clean up upload files older than 48 hours on every startup
+    try:
+        from app.api.routes.data import _cleanup_upload_dir
+        result = _cleanup_upload_dir(max_age_hours=48)
+        if result["removed_count"]:
+            logger.info("startup_upload_cleanup", removed=result["removed_count"])
+    except Exception as exc:
+        logger.warning("startup_upload_cleanup_failed", error=str(exc))
+
     yield
     logger.info("shutdown")
 

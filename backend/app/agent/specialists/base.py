@@ -72,7 +72,7 @@ class SpecialistResult:
                 parts.append(f"  Quality score: {self.data['quality_score']}/100")
 
             if "column_profiles" in self.data:
-                for cp in self.data["column_profiles"][:8]:
+                for cp in self.data["column_profiles"][:20]:
                     line = f"  - {cp.get('name')}: {cp.get('dtype')}"
                     if cp.get("mean") is not None:
                         line += f", mean={cp['mean']}, median={cp.get('median', '?')}, std={cp.get('std', '?')}"
@@ -100,7 +100,7 @@ class SpecialistResult:
             if "query" in self.data:
                 parts.append(f"  SQL: {self.data['query']}")
             if "preview" in self.data and isinstance(self.data["preview"], list):
-                rows = self.data["preview"][:5]
+                rows = self.data["preview"][:10]
                 if rows:
                     parts.append(f"  Result ({self.data.get('row_count', len(rows))} rows):")
                     for r in rows:
@@ -127,13 +127,21 @@ class SpecialistResult:
                 descs = self.data["descriptions"]
                 items: list[tuple[str, dict]] = []
                 if isinstance(descs, dict):
-                    items = list(descs.items())[:8]
+                    items = list(descs.items())[:20]
                 elif isinstance(descs, list):
-                    items = [(d.get("column", "?"), d) for d in descs[:8] if isinstance(d, dict)]
+                    items = [(d.get("column", "?"), d) for d in descs[:20] if isinstance(d, dict)]
                 for col, desc in items:
                     if not isinstance(desc, dict):
                         continue
                     line = f"  - {col}"
+                    total = desc.get("total_rows")
+                    non_null = desc.get("non_null_count")
+                    null_c = desc.get("null_count")
+                    if total is not None and non_null is not None:
+                        line += f" (total_rows={total}, non_null={non_null}"
+                        if null_c:
+                            line += f", nulls={null_c}"
+                        line += ")"
                     if desc.get("mean") is not None:
                         line += f": mean={desc['mean']}, median={desc.get('median', '?')}, std={desc.get('std', '?')}"
                         if desc.get("skewness") is not None:

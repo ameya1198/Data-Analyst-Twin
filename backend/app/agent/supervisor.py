@@ -29,13 +29,15 @@ from app.agent.intent import (
     ClassifiedIntent,
     ExecutionMode,
     IntentClassifier,
+    UserIntent,
 )
 from app.agent.memory import ConversationMemory
-from app.agent.planner import AnalysisPlan, Planner
+from app.agent.planner import AnalysisPlan, AnalysisStep, Planner
 from app.agent.prompts import (
     FOCUSED_SYNTHESIS_PROMPT,
     SUPERVISOR_SYSTEM_PROMPT,
     SYNTHESIZER_PROMPT,
+    select_output_template,
 )
 from app.agent.reflector import Reflector
 from app.agent.specialists.base import ResultType, SpecialistRegistry, SpecialistResult
@@ -62,6 +64,7 @@ class Supervisor:
         context: AnalysisContext | None = None,
         max_reflect_cycles: int = 2,
         max_tool_calls_per_turn: int | None = None,
+        confirmation_timeout_seconds: int | None = None,
     ) -> None:
         self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._registry = registry
@@ -69,7 +72,8 @@ class Supervisor:
         self.memory = ConversationMemory()
 
         self._middleware = ErrorRecoveryMiddleware(registry)
-        self._confirmation_manager = ConfirmationManager()
+        timeout = confirmation_timeout_seconds if confirmation_timeout_seconds is not None else settings.confirmation_timeout_seconds
+        self._confirmation_manager = ConfirmationManager(timeout_seconds=timeout)
         self._intent_classifier = IntentClassifier()
         self._current_trace_id: str | None = None
         self._planner = Planner(self._client, registry)
@@ -164,7 +168,7 @@ class Supervisor:
                 yield self._tag(event)
 
         elif classified.mode == ExecutionMode.FOCUSED:
-            async for event in self._run_focused(user_message):
+            async for event in self._run_focused(user_message, classified):
                 yield self._tag(event)
 
         elif classified.mode == ExecutionMode.FULL:
@@ -269,6 +273,7 @@ class Supervisor:
 
     async def _run_focused(
         self, user_message: str,
+        classified: ClassifiedIntent | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         plan = await self._plan(user_message)
         yield StreamEvent(
@@ -277,9 +282,91 @@ class Supervisor:
         )
 
         if not plan.steps:
-            async for event in self._run_conversational(user_message, self._scoped_dataset_ids):
-                yield event
-            return
+            # For visualization requests, retry planning once before falling
+            # through to CONVERSATIONAL mode (which often omits tool calls).
+            if (
+                classified
+                and classified.intent == UserIntent.VISUALIZATION
+                and self.context.has_data
+            ):
+                logger.info("viz_plan_retry", reason="empty_plan_on_viz_intent")
+                retry_plan = await self._plan(
+                    f"Create a chart for this question. Use sql_execute with save_as "
+                    f"to get the data, then viz_bar_chart on the saved result. "
+                    f"Original question: {user_message}"
+                )
+                if retry_plan.steps:
+                    plan = retry_plan
+                    yield StreamEvent(
+                        event_type=StreamEventType.PLAN,
+                        data=plan.to_display(),
+                    )
+            if not plan.steps:
+                async for event in self._run_conversational(
+                    user_message, self._scoped_dataset_ids
+                ):
+                    yield event
+                return
+
+        # ── Plan post-processing for VISUALIZATION intent ─────────────
+        if (
+            classified
+            and classified.intent == UserIntent.VISUALIZATION
+            and plan.steps
+        ):
+            has_viz = any(s.tool_name.startswith("viz_") for s in plan.steps)
+            if not has_viz:
+                # No viz step at all — inject one with auto-columns
+                for step in reversed(plan.steps):
+                    if step.tool_name == "sql_execute" and "save_as" not in step.tool_params:
+                        step.tool_params["save_as"] = "_viz_data"
+                        break
+                plan.steps.append(AnalysisStep(
+                    step_number=len(plan.steps) + 1,
+                    description="Create bar chart from the query results",
+                    tool_name="viz_bar_chart",
+                    tool_params={"dataset_id": "_viz_data", "x": "__auto__", "y": "__auto__"},
+                    rationale="User requested a visualization",
+                    workflow_phase="Visualization",
+                ))
+                logger.info("viz_step_injected", total_steps=len(plan.steps))
+            else:
+                # Viz step exists — ensure any referenced dataset_id from the
+                # viz step is actually saved by a preceding SQL step.
+                # The planner often writes dataset_id="some_name" in the viz
+                # step but forgets to add save_as="some_name" to the SQL step.
+                viz_dataset_ids = set()
+                for step in plan.steps:
+                    if step.tool_name.startswith("viz_"):
+                        vid = step.tool_params.get("dataset_id", "")
+                        if vid and vid not in self.context.datasets:
+                            viz_dataset_ids.add(vid)
+
+                if viz_dataset_ids:
+                    # Find the last SQL step and make it save_as the expected name
+                    target_id = next(iter(viz_dataset_ids))
+                    for step in reversed(plan.steps):
+                        if step.tool_name == "sql_execute":
+                            existing_save = step.tool_params.get("save_as")
+                            if not existing_save:
+                                step.tool_params["save_as"] = target_id
+                                logger.info(
+                                    "viz_save_as_patched",
+                                    save_as=target_id,
+                                    step=step.step_number,
+                                )
+                            elif existing_save != target_id:
+                                # SQL saves under a different name — fix the viz
+                                # step to reference the actual saved name.
+                                for vs in plan.steps:
+                                    if vs.tool_name.startswith("viz_") and vs.tool_params.get("dataset_id") == target_id:
+                                        vs.tool_params["dataset_id"] = existing_save
+                                        logger.info(
+                                            "viz_dataset_id_patched",
+                                            old=target_id,
+                                            new=existing_save,
+                                        )
+                            break
 
         all_results: list[SpecialistResult] = []
         async for event in self._executor.execute_plan(plan, self.context):
@@ -288,6 +375,27 @@ class Supervisor:
                 matched = self._find_latest_result()
                 if matched:
                     all_results.append(matched)
+
+        # Auto-chart fallback: if intent was VISUALIZATION but no chart was
+        # produced (e.g. viz step failed due to wrong columns), build the
+        # chart directly from the latest SQL/table result.
+        if (
+            classified
+            and classified.intent == UserIntent.VISUALIZATION
+            and not any(r.result_type == ResultType.CHART for r in all_results)
+        ):
+            chart_result = await self._auto_chart_from_results(all_results)
+            if chart_result and chart_result.success:
+                all_results.append(chart_result)
+                yield StreamEvent(
+                    event_type=StreamEventType.SPECIALIST_RESULT,
+                    data={
+                        "result_type": chart_result.result_type.value,
+                        "summary": chart_result.summary,
+                        "data": self._serialize_result_data(chart_result),
+                    },
+                    specialist_name=chart_result.specialist_name,
+                )
 
         final_response = await self._synthesize_lightweight(user_message, all_results)
 
@@ -410,12 +518,14 @@ class Supervisor:
         """Full narrative synthesis — used in FULL mode."""
         results_summary = "\n".join(r.to_llm_context() for r in results)
         reflection_summary = self.context.get_recent_results_summary(limit=5)
+        output_template = select_output_template(results)
 
         system_prompt = self._build_system_prompt()
         synth_message = SYNTHESIZER_PROMPT.format(
             user_message=user_message,
             results_summary=results_summary,
             reflection_summary=reflection_summary,
+            output_template=output_template,
         )
 
         t0 = time.perf_counter()
@@ -443,10 +553,12 @@ class Supervisor:
     ) -> str:
         """Lightweight synthesis — used in FOCUSED mode. One short LLM call."""
         results_summary = "\n".join(r.to_llm_context() for r in results)
+        output_template = select_output_template(results)
 
         synth_message = FOCUSED_SYNTHESIS_PROMPT.format(
             user_message=user_message,
             results_summary=results_summary,
+            output_template=output_template,
         )
 
         t0 = time.perf_counter()
@@ -528,6 +640,76 @@ class Supervisor:
                 summary=entry.step_description,
                 metadata=entry.metadata,
             )
+        return None
+
+    async def _auto_chart_from_results(
+        self, results: list[SpecialistResult],
+    ) -> SpecialistResult | None:
+        """Auto-generate a bar chart from the latest SQL/table result.
+
+        Called when a VISUALIZATION intent produced data but no chart.
+        Picks the first categorical column as x and the first numeric column as y.
+        """
+        import pandas as pd
+
+        # Find the latest SQL/table result that has a saved dataset
+        for result in reversed(results):
+            if not result.success:
+                continue
+            data = result.data
+            if not isinstance(data, dict):
+                continue
+
+            # Check if the SQL result was saved as a dataset
+            saved_as = data.get("saved_as")
+            if saved_as and saved_as in self.context.datasets:
+                df = self.context.datasets[saved_as]
+            elif data.get("preview") and isinstance(data["preview"], list) and data["preview"]:
+                # Build a DataFrame from the preview rows
+                df = pd.DataFrame(data["preview"])
+            else:
+                continue
+
+            if df.empty or len(df.columns) < 2:
+                continue
+
+            # Auto-detect x (first non-numeric col) and y (first numeric col)
+            x_col = None
+            y_col = None
+            for col in df.columns:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    if y_col is None:
+                        y_col = col
+                else:
+                    if x_col is None:
+                        x_col = col
+
+            if not x_col or not y_col:
+                continue
+
+            # Save the DF as a dataset if not already saved
+            ds_id = saved_as or "_auto_viz_data"
+            if ds_id not in self.context.datasets:
+                self.context.add_dataset(ds_id, df, f"auto_viz_{ds_id}")
+
+            logger.info(
+                "auto_chart_generating",
+                dataset_id=ds_id,
+                x=x_col,
+                y=y_col,
+                rows=len(df),
+            )
+
+            viz_specialist = self._registry.get_specialist("viz")
+            if not viz_specialist:
+                return None
+
+            return await viz_specialist.execute(
+                "viz_bar_chart",
+                {"dataset_id": ds_id, "x": x_col, "y": y_col, "sort": True},
+                self.context,
+            )
+
         return None
 
     def _serialize_result_data(self, result: SpecialistResult):
