@@ -1,0 +1,8 @@
+<svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Bar chart -->
+  <rect x="5"  y="16" width="4" height="8" rx="1" fill="#BA7517" opacity="0.5"/>
+  <rect x="12" y="10" width="4" height="14" rx="1" fill="#BA7517" opacity="0.8"/>
+  <rect x="19" y="13" width="4" height="11" rx="1" fill="#BA7517"/>
+  <!-- Purple overlaid line chart -->
+  <path d="M5 12 Q10 6 14 9 Q18 12 23 5" stroke="#534AB7" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

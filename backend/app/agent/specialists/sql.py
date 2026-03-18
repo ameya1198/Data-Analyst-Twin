@@ -300,7 +300,8 @@ class SQLSpecialist(BaseSpecialist):
                 nullable = "" if null_pct == 0 else "  -- {:.0f}% NULL".format(null_pct)
                 col_defs.append(f"    {col} {sql_type}{nullable}")
 
-            create_sql = f"CREATE TABLE {did} (\n" + ",\n".join(col_defs) + "\n);"
+            # Quote dataset_id in CREATE TABLE — required when id starts with digit (e.g. 0d8e0bf1)
+            create_sql = f'CREATE TABLE "{did}" (\n' + ",\n".join(col_defs) + "\n);"
             create_statements.append(create_sql)
 
             schemas.append({
@@ -315,7 +316,10 @@ class SQLSpecialist(BaseSpecialist):
             "schemas": schemas,
             "table_count": len(schemas),
             "create_statements": "\n\n".join(create_statements),
-            "usage_hint": "Use dataset_id values as table names in sql_execute queries.",
+            "usage_hint": (
+                "Use dataset_id as table name in sql_execute. "
+                "Quote it when it starts with a digit (e.g. FROM \"0d8e0bf1\")."
+            ),
         }
 
         table_summary = "; ".join(
@@ -364,10 +368,14 @@ class SQLSpecialist(BaseSpecialist):
         conn = duckdb.connect(":memory:")
         try:
             for did, df in context.datasets.items():
+                # SQL identifiers cannot start with digits (e.g. 0d8e0bf1). Use internal
+                # name starting with letter, then create quoted view for dataset_id.
                 safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", did)
-                conn.register(safe_name, df)
-                if safe_name != did:
-                    conn.execute(f'CREATE VIEW "{did}" AS SELECT * FROM {safe_name}')
+                needs_quoted_view = safe_name[0].isdigit() or safe_name != did
+                internal_name = f"tbl_{safe_name}" if safe_name[0].isdigit() else safe_name
+                conn.register(internal_name, df)
+                if needs_quoted_view:
+                    conn.execute(f'CREATE VIEW "{did}" AS SELECT * FROM {internal_name}')
 
             start_time = time.perf_counter()
             result_rel = conn.execute(query)

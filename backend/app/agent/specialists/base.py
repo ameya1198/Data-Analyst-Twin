@@ -63,8 +63,11 @@ class SpecialistResult:
         parts = [f"[{self.specialist_name}] {self.summary}"]
 
         if isinstance(self.data, dict):
-            if "rows" in self.data and "columns" in self.data:
-                parts.append(f"  Shape: {self.data['rows']} rows, {self.data['columns']} cols")
+            row_info = self.data.get("rows") or self.data.get("row_count")
+            col_info = self.data.get("columns")
+            if col_info is not None and row_info is not None:
+                col_count = col_info if isinstance(col_info, int) else len(col_info)
+                parts.append(f"  Shape: {row_info} rows, {col_count} cols")
             if "quality_score" in self.data:
                 parts.append(f"  Quality score: {self.data['quality_score']}/100")
 

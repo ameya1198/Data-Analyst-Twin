@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80">
+  <!-- Wordmark -->
+  <text
+    x="160" y="52"
+    text-anchor="middle"
+    font-size="40"
+    font-weight="400"
+    fill="#1a1a2e"
+    font-family="sans-serif"
+    letter-spacing="10"
+  >ANVAYA</text>
+  <!-- Amber underline accent under the A -->
+  <line x1="22" y1="62" x2="58" y2="62" stroke="#EF9F27" stroke-width="3.5" stroke-linecap="round"/>
+  <!-- Tagline -->
+  <text
+    x="160" y="76"
+    text-anchor="middle"
+    font-size="7"
+    font-weight="400"
+    fill="#888888"
+    font-family="sans-serif"
+    letter-spacing="3"
+  >ANCIENT LOGIC. MODERN INTELLIGENCE.</text>
+</svg>

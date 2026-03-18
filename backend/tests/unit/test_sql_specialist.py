@@ -305,6 +305,21 @@ class TestSQLEdgeCases:
         assert r.data["row_count"] == 1
 
     @pytest.mark.asyncio
+    async def test_avg_with_dataset_id_starting_with_digit(self, sql: SQLSpecialist):
+        """Dataset IDs starting with digit (e.g. 0d8e0bf1) require quoted table names.
+        Ensures AVG and other aggregates return correct values."""
+        ctx = AnalysisContext()
+        ratings = [4.0, 5.0, 3.5, 4.5, 4.0, 5.0, 4.5, None, 3.0, 5.0]  # 9 non-null
+        df = pd.DataFrame({"rating": ratings})
+        ctx.add_dataset("0d8e0bf1", df, "ratings.csv")
+        query = 'SELECT AVG(rating) AS average_rating FROM "0d8e0bf1" WHERE rating IS NOT NULL'
+        r = await sql.execute("sql_execute", {"query": query}, ctx)
+        assert r.success
+        expected_avg = sum(x for x in ratings if x is not None) / 9  # 4.277...
+        actual = r.data["preview"][0]["average_rating"]
+        assert abs(actual - expected_avg) < 1e-9
+
+    @pytest.mark.asyncio
     async def test_large_result_truncation(self, sql: SQLSpecialist):
         ctx = AnalysisContext()
         df = pd.DataFrame({"x": range(5000)})
@@ -378,3 +393,83 @@ GROUP BY product_category"""
         r = await sql.execute("sql_execute", {"query": query}, ctx_orders)
         assert r.success
         assert r.data["preview"][0]["bad_calc"] == float("inf")
+
+    @pytest.mark.asyncio
+    async def test_avg_with_dataset_id_starting_with_digit(self, sql: SQLSpecialist):
+        """AVG works correctly when dataset_id starts with a digit (e.g. 0d8e0bf1 from uuid8)."""
+        df = pd.DataFrame({
+            "rating": [3.0, 4.0, 5.0, 4.0, 5.0, 3.0, 4.0, 4.5, 5.0, 4.0],  # mean = 4.05
+        })
+        # 4.05 = 40.5/10
+        ctx = AnalysisContext()
+        ctx.add_dataset("0d8e0bf1", df, "ratings.csv")
+        query = 'SELECT AVG(rating) AS average_rating FROM "0d8e0bf1" WHERE rating IS NOT NULL'
+        r = await sql.execute("sql_execute", {"query": query}, ctx)
+        assert r.success, r.summary
+        assert r.data["row_count"] == 1
+        assert "average_rating" in r.data["columns"]
+        got = r.data["preview"][0]["average_rating"]
+        assert abs(got - 4.05) < 1e-9, f"Expected ~4.05, got {got}"
+
+    @pytest.mark.asyncio
+    async def test_avg_with_dataset_id_starting_with_digit(self, sql: SQLSpecialist):
+        """AVG query works when dataset_id starts with digit (e.g. 0d8e0bf1 from uuid prefix)."""
+        # Simulates real scenario: dataset_id from uuid.uuid4()[:8] can start with 0-9
+        df = pd.DataFrame({"rating": [3.0, 4.0, 5.0, 4.5, 4.0, 5.0, 4.0, None]})
+        expected_avg = df["rating"].mean()  # 4.2142857...
+        ctx = AnalysisContext()
+        ctx.add_dataset("0d8e0bf1", df, "ratings.csv")
+        query = 'SELECT AVG(rating) AS average_rating FROM "0d8e0bf1" WHERE rating IS NOT NULL'
+        r = await sql.execute("sql_execute", {"query": query}, ctx)
+        assert r.success, r.summary
+        got = r.data["preview"][0]["average_rating"]
+        assert abs(got - expected_avg) < 1e-9, f"AVG wrong: expected {expected_avg}, got {got}"
+
+    @pytest.mark.asyncio
+    async def test_avg_with_dataset_id_starting_with_digit(self, sql: SQLSpecialist):
+        """AVG query works when dataset_id starts with a digit (e.g. 0d8e0bf1)."""
+        # Dataset ID mimics uuid4()[:8] which can start with 0-9
+        ratings = [4.0, 5.0, 3.5, 4.5, None, 4.0, 5.0]  # 6 non-null, avg = 26/6 ≈ 4.333
+        ctx = AnalysisContext()
+        df = pd.DataFrame({"rating": ratings})
+        ctx.add_dataset("0d8e0bf1", df, "ratings.csv")
+        query = 'SELECT AVG(rating) AS average_rating FROM "0d8e0bf1" WHERE rating IS NOT NULL'
+        r = await sql.execute("sql_execute", {"query": query}, ctx)
+        assert r.success
+        assert r.data["row_count"] == 1
+        actual = r.data["preview"][0]["average_rating"]
+        expected_avg = sum(x for x in ratings if x is not None) / 6
+        assert abs(actual - expected_avg) < 1e-10
+
+    @pytest.mark.asyncio
+    async def test_avg_with_dataset_id_starting_with_digit(self, sql: SQLSpecialist):
+        """AVG query works correctly when dataset_id starts with a digit (e.g. 0d8e0bf1).
+        Dataset IDs from uuid.uuid4()[:8] can start with 0-9; table must be quoted in SQL.
+        """
+        # Simulates a ratings dataset like the user's (77 rows, some nulls)
+        ratings = [4.0, 5.0, 3.0, 4.0, 5.0, 4.0, 3.5, 4.5, None, 5.0] * 8  # 80 values, 8 nulls
+        df = pd.DataFrame({"rating": ratings})
+        ctx = AnalysisContext()
+        ctx.add_dataset("0d8e0bf1", df, "ratings.csv")
+        query = 'SELECT AVG(rating) AS average_rating FROM "0d8e0bf1" WHERE rating IS NOT NULL'
+        r = await sql.execute("sql_execute", {"query": query}, ctx)
+        assert r.success, r.summary
+        expected_avg = sum(x for x in ratings if x is not None) / (80 - 8)
+        got = r.data["preview"][0]["average_rating"]
+        assert abs(got - expected_avg) < 1e-9, f"Expected {expected_avg}, got {got}"
+
+    @pytest.mark.asyncio
+    async def test_avg_with_dataset_id_starting_with_digit(self, sql: SQLSpecialist):
+        """AVG query works when dataset_id starts with a digit (e.g. 0d8e0bf1 from uuid)."""
+        ctx = AnalysisContext()
+        df = pd.DataFrame({
+            "rating": [3.0, 4.0, 5.0, 4.5, 4.0, 5.0, 4.5, None, 4.0],
+        })
+        ctx.add_dataset("0d8e0bf1", df, "ratings.csv")
+        query = 'SELECT AVG(rating) as average_rating FROM "0d8e0bf1" WHERE rating IS NOT NULL'
+        r = await sql.execute("sql_execute", {"query": query}, ctx)
+        assert r.success
+        assert r.data["row_count"] == 1
+        expected_avg = (3.0 + 4.0 + 5.0 + 4.5 + 4.0 + 5.0 + 4.5 + 4.0) / 8
+        actual = r.data["preview"][0]["average_rating"]
+        assert abs(actual - expected_avg) < 0.0001

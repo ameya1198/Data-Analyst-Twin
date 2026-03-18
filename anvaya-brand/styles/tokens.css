@@ -1,0 +1,38 @@
+/* ============================================
+   ANVAYA — Brand Design Tokens
+   Ancient logic. Modern intelligence.
+   ============================================ */
+
+:root {
+  /* ── Core Brand Colours ── */
+  --anvaya-navy:      #26215C;   /* Primary — dark backgrounds, favicon */
+  --anvaya-purple:    #534AB7;   /* Accent — links, borders, icons */
+  --anvaya-purple-mid:#7F77DD;   /* Mid purple — hover states */
+  --anvaya-lavender:  #EEEDFE;   /* Light purple — subtle backgrounds */
+  --anvaya-amber:     #EF9F27;   /* Highlight — underline accent, CTA */
+  --anvaya-amber-dark:#BA7517;   /* Amber hover state */
+
+  /* ── Typography ── */
+  --anvaya-font-sans:  system-ui, sans-serif;
+  --anvaya-font-serif: Georgia, serif;         /* Used for अ glyph */
+
+  --anvaya-tracking-wide:   0.18em;  /* Wordmark letter-spacing */
+  --anvaya-tracking-wider:  0.26em;  /* All-caps wordmark */
+  --anvaya-tracking-widest: 0.30em;  /* Tagline */
+
+  /* ── Wordmark sizes ── */
+  --anvaya-logo-xl:   48px;   /* Hero */
+  --anvaya-logo-lg:   36px;   /* Section headers */
+  --anvaya-logo-md:   22px;   /* Navbar */
+  --anvaya-logo-sm:   16px;   /* Footer */
+
+  /* ── Favicon sizes ── */
+  --anvaya-favicon-lg: 64px;
+  --anvaya-favicon-md: 32px;
+  --anvaya-favicon-sm: 16px;
+
+  /* ── Accent line ── */
+  --anvaya-accent-color:  #EF9F27;
+  --anvaya-accent-width:  3.5px;
+  --anvaya-accent-radius: 2px;
+}

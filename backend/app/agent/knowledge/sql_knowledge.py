@@ -629,7 +629,8 @@ def validate_sql_style(sql: str) -> list[dict[str, str]]:
     ]
 
     for kw in keywords:
-        pattern = rf"\b{kw.replace(' ', r'\s+')}\b"
+        escaped = kw.replace(" ", r"\s+")
+        pattern = rf"\b{escaped}\b"
         matches = re.finditer(pattern, sql, re.IGNORECASE)
         for m in matches:
             if m.group() != m.group().upper():
