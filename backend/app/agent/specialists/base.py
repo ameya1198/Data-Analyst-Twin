@@ -54,12 +54,23 @@ class SpecialistResult:
     def to_llm_context(self) -> str:
         """Format result for injection into the next LLM call.
 
-        Includes key data points so the synthesis LLM can cite real numbers
-        instead of producing vague summaries.
+        Uses Pydantic schema rendering (tables + bullet points) when a schema
+        is registered for the tool.  Falls back to the legacy flat format for
+        unknown tools or when validation fails.
         """
         if not self.success:
             return f"[{self.specialist_name} ERROR] {self.error}"
 
+        # ── Try schema-based rendering first ──────────────────────────
+        if isinstance(self.data, dict):
+            from app.agent.specialists.schemas import validate_and_render
+
+            tool_name = self.metadata.get("tool_name", "")
+            md = validate_and_render(tool_name, self.data)
+            if md is not None:
+                return f"[{self.specialist_name}] {self.summary}\n\n{md}"
+
+        # ── Legacy fallback ───────────────────────────────────────────
         parts = [f"[{self.specialist_name}] {self.summary}"]
 
         if isinstance(self.data, dict):
@@ -240,6 +251,7 @@ class BaseSpecialist(ABC):
                 result = await self._execute_tool_mode(tool_name, params, context)
 
             result.latency_ms = (time.perf_counter() - start) * 1000
+            result.metadata.setdefault("tool_name", tool_name)
 
             # Write to shared context
             context.add_result(
@@ -248,6 +260,7 @@ class BaseSpecialist(ABC):
                 result_type=result.result_type.value,
                 data=result.data,
                 latency_ms=result.latency_ms,
+                tool_name=tool_name,
             )
 
             logger.info(

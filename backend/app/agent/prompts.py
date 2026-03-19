@@ -420,12 +420,19 @@ Here are the analysis results (with actual data):
 {output_template}
 
 Global rules — ALWAYS apply on top of the template above:
+- CRITICAL: When the template includes a table, output it using MARKDOWN PIPE syntax EXACTLY like this:
+  | Column | Value |
+  | --- | --- |
+  | data | here |
+  NEVER render tables as space-separated or tab-separated text. ALWAYS use | pipes |.
+- When the template includes bullet points, use - dash syntax.
 - Use ONLY the actual numbers from the results. NEVER fabricate or round aggressively.
 - For SQL aggregates (AVG, SUM, COUNT): use ONLY the numbers from the Result rows. Do NOT substitute dataset row counts.
 - NEVER say "Phase 1", "Phase 2", tool names like "eda_profile", or any internal label.
 - NEVER add "Next Steps", "Recommendations", "Further Analysis", or "Limitations" unless explicitly asked.
 - NEVER use filler phrases: "Let me", "I'd be happy to", "Here's what I found", "Based on my analysis".
-- Bold key values with **markdown**."""
+- Bold key values with **markdown**.
+- You may add ONE summary sentence before the structured output. No more."""
 
 SYNTHESIZER_PROMPT = """You are presenting analysis results to the user.
 
@@ -440,6 +447,12 @@ Reflection notes:
 {output_template}
 
 Global rules — ALWAYS apply on top of the template above:
+- CRITICAL: When the template includes a table, output it using MARKDOWN PIPE syntax EXACTLY like this:
+  | Column | Value |
+  | --- | --- |
+  | data | here |
+  NEVER render tables as space-separated or tab-separated text. ALWAYS use | pipes |.
+- When the template includes bullet points, use - dash syntax.
 - Use ONLY the actual numbers from the results. NEVER fabricate or round aggressively.
 - For SQL aggregates (AVG, SUM, COUNT): use ONLY the numbers from the Result rows. Do NOT substitute dataset row counts.
 - Bold key values with **markdown**.
@@ -447,5 +460,5 @@ Global rules — ALWAYS apply on top of the template above:
 - Mention data quality caveats ONLY if quality score < 80 or there are high-severity issues.
 - Do NOT add "Next Steps" or "Recommendations" unless the user asked for them.
 - NEVER use internal labels (Phase 1, eda_profile, etc.) or filler phrases ("I analyzed", "Let me", "Based on my analysis").
-- Keep it concise — 4-10 sentences for complex analyses, 2-5 for simple ones.
+- You may add ONE summary sentence before the structured output. No more.
 """

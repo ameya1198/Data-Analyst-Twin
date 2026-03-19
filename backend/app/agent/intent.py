@@ -109,7 +109,7 @@ INTENT_TO_MODE: dict[UserIntent, ExecutionMode] = {
 _DIRECT_PATTERNS: list[tuple[str, UserIntent, float]] = [
     (r"\b(?:profile|overview|summarize?\s+(?:the\s+)?data)\b", UserIntent.PROFILE_DATA, 0.95),
     (r"\bdata\s*quality\b", UserIntent.DATA_QUALITY, 0.95),
-    (r"\b(?:describe|summary\s+stat|descriptive\s+stat)", UserIntent.DESCRIBE_COLUMNS, 0.90),
+    (r"\b(?:describe|summary\s+stat|descriptive\s+stat|statistics\s+(?:for|of|about)|stats\s+(?:for|of|about)|give\s+(?:me\s+)?(?:the\s+)?(?:descriptive\s+)?stat)", UserIntent.DESCRIBE_COLUMNS, 0.90),
     (r"\bcorrelat", UserIntent.CORRELATIONS, 0.90),
     (r"\b(?:value\s*count|frequency|distribution\s+of|how\s+many\s+(?:of|per|in|are)|per\s+\w+\s*(?:category|group|type|segment))", UserIntent.VALUE_COUNTS, 0.85),
     (r"\b(?:schema|show\s+tables|table\s+structure|columns?\s+(?:list|names))", UserIntent.SCHEMA, 0.90),

@@ -39,6 +39,7 @@ from app.agent.prompts import (
     SYNTHESIZER_PROMPT,
     select_output_template,
 )
+from app.agent.specialists.schemas import validate_and_render
 from app.agent.reflector import Reflector
 from app.agent.specialists.base import ResultType, SpecialistRegistry, SpecialistResult
 from app.agent.specialists.context import AnalysisContext
@@ -515,11 +516,52 @@ class Supervisor:
     async def _synthesize_full(
         self, user_message: str, results: list[SpecialistResult],
     ) -> str:
-        """Full narrative synthesis — used in FULL mode."""
+        """Full narrative synthesis — used in FULL mode.
+
+        Same schema-first strategy as _synthesize_lightweight: if Pydantic
+        schemas can render the results, the LLM only writes a narrative
+        summary and the tables/bullets are appended deterministically.
+        """
+        schema_markdown = self._render_results_markdown(results)
         results_summary = "\n".join(r.to_llm_context() for r in results)
         reflection_summary = self.context.get_recent_results_summary(limit=5)
-        output_template = select_output_template(results)
 
+        if schema_markdown:
+            # Schema produced structured output — LLM writes narrative only
+            t0 = time.perf_counter()
+            response = await self._client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=512,
+                system=(
+                    "You are a senior data analyst writing a brief narrative summary. "
+                    "Write 2-4 sentences highlighting the most important findings. "
+                    "Cite key numbers with **bold**. Do NOT include tables or bullet lists — "
+                    "structured data will be appended separately. "
+                    "No preamble, no 'Next Steps', no tool names or internal labels."
+                ),
+                messages=[{"role": "user", "content": (
+                    f"User question: {user_message}\n\n"
+                    f"Analysis results:\n{results_summary}\n\n"
+                    f"Reflection notes:\n{reflection_summary}"
+                )}],
+            )
+            latency = (time.perf_counter() - t0) * 1000
+            metrics = metrics_collector.get_or_create(self.context.session_id)
+            metrics.record_llm_call(
+                response.usage.input_tokens, response.usage.output_tokens, latency,
+            )
+            logger.info(
+                "supervisor_synthesize_full",
+                mode="schema_render",
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                latency_ms=round(latency, 2),
+            )
+            summary = response.content[0].text.strip()
+            return f"{summary}\n\n{schema_markdown}"
+
+        # Fallback: full LLM synthesis
+        output_template = select_output_template(results)
         system_prompt = self._build_system_prompt()
         synth_message = SYNTHESIZER_PROMPT.format(
             user_message=user_message,
@@ -542,6 +584,7 @@ class Supervisor:
 
         logger.info(
             "supervisor_synthesize_full",
+            mode="llm_full",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             latency_ms=round(latency, 2),
@@ -551,7 +594,60 @@ class Supervisor:
     async def _synthesize_lightweight(
         self, user_message: str, results: list[SpecialistResult],
     ) -> str:
-        """Lightweight synthesis — used in FOCUSED mode. One short LLM call."""
+        """Lightweight synthesis — used in DIRECT / FOCUSED mode.
+
+        Strategy (from @systematic-debugging + @prompt-engineering):
+        LLMs are unreliable at preserving exact table formatting.  Instead of
+        asking the LLM to reproduce a table, we:
+        1. Render the structured data as markdown tables/bullets via the
+           Pydantic schema's ``to_markdown()`` — this is deterministic.
+        2. Ask the LLM ONLY for a 1-2 sentence summary of the findings.
+        3. Concatenate: ``{llm_summary}\n\n{schema_markdown}``
+        This guarantees consistent pipe-table output every time.
+        """
+
+        # ── Try schema-based rendering first ──────────────────────────
+        schema_markdown = self._render_results_markdown(results)
+
+        if schema_markdown:
+            # Schema produced structured output — LLM only writes summary
+            results_summary = "\n".join(r.to_llm_context() for r in results)
+
+            t0 = time.perf_counter()
+            response = await self._client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=256,
+                system=(
+                    "You are a data analyst. Write ONLY a 1-2 sentence summary of "
+                    "the analysis results below. Cite 2-3 key numbers with **bold**. "
+                    "Do NOT include tables, bullet points, or detailed breakdowns — "
+                    "those will be appended separately. No preamble. No 'Next Steps'. "
+                    "No tool names or internal labels."
+                ),
+                messages=[{"role": "user", "content": (
+                    f"User question: {user_message}\n\n"
+                    f"Analysis results:\n{results_summary}"
+                )}],
+            )
+            latency = (time.perf_counter() - t0) * 1000
+
+            metrics = metrics_collector.get_or_create(self.context.session_id)
+            metrics.record_llm_call(
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                latency,
+            )
+            logger.info(
+                "supervisor_synthesize_lightweight",
+                mode="schema_render",
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                latency_ms=round(latency, 2),
+            )
+            summary = response.content[0].text.strip()
+            return f"{summary}\n\n{schema_markdown}"
+
+        # ── Fallback: full LLM synthesis (no schema available) ────────
         results_summary = "\n".join(r.to_llm_context() for r in results)
         output_template = select_output_template(results)
 
@@ -567,28 +663,47 @@ class Supervisor:
             max_tokens=2048,
             system=(
                 "You are a data analyst giving concise answers. "
-                "FIRST sentence = the answer (a number or finding). No preamble. "
-                "You have REAL data in the results — cite actual numbers, means, p-values, row counts. "
+                "You have REAL data in the results — cite actual numbers. "
                 "Bold key values with **markdown**. "
-                "For SQL: If user asked for ONLY the query (e.g. 'just the query', 'SQL only', 'that\\'s all'), output ONLY the ```sql block. Otherwise show query + results table. "
+                "CRITICAL: All tables MUST use markdown pipe syntax: | Col | Val |\n"
+                "All bullet lists MUST use - dash syntax.\n"
+                "You may add ONE summary sentence before the structured output. "
                 "NEVER say 'Phase 1', tool names, 'Based on my analysis', or 'Let me'. "
-                "NEVER add 'Next Steps' or 'Recommendations' unless asked. "
-                "3-6 sentences max. Every sentence must contain a specific number."
+                "NEVER add 'Next Steps' or 'Recommendations' unless asked."
             ),
             messages=[{"role": "user", "content": synth_message}],
         )
         latency = (time.perf_counter() - t0) * 1000
 
         metrics = metrics_collector.get_or_create(self.context.session_id)
-        metrics.record_llm_call(response.usage.input_tokens, response.usage.output_tokens, latency)
-
+        metrics.record_llm_call(
+            response.usage.input_tokens, response.usage.output_tokens, latency,
+        )
         logger.info(
             "supervisor_synthesize_lightweight",
+            mode="llm_full",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             latency_ms=round(latency, 2),
         )
         return response.content[0].text
+
+    def _render_results_markdown(self, results: list[SpecialistResult]) -> str | None:
+        """Try to render all results as structured markdown via Pydantic schemas.
+
+        Returns the combined markdown string if ALL results have a schema,
+        or ``None`` if any result lacks one (triggers LLM fallback).
+        """
+        parts: list[str] = []
+        for r in results:
+            if not r.success or not isinstance(r.data, dict):
+                continue
+            tool_name = r.metadata.get("tool_name", "")
+            md = validate_and_render(tool_name, r.data)
+            if md is not None:
+                parts.append(md)
+
+        return "\n\n".join(parts) if parts else None
 
     # ─── No-data handler ──────────────────────────────────────────────
 
